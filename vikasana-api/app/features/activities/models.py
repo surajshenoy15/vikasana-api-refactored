@@ -1,10 +1,26 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Float, func, Index, Boolean
-from sqlalchemy import Enum as SAEnum
-from sqlalchemy.orm import relationship
+from __future__ import annotations
+
 import enum
+from datetime import datetime
+from typing import Optional
+
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    DateTime,
+    ForeignKey,
+    Float,
+    func,
+    Index,
+    Boolean,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy import Enum as SAEnum
+from sqlalchemy.orm import relationship, Mapped, mapped_column
 
 from app.core.database import Base
-
 
 class ActivitySessionStatus(str, enum.Enum):
     DRAFT = "DRAFT"
