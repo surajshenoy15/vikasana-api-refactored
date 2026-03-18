@@ -4,7 +4,10 @@ WORKDIR /app
 
 # System deps for opencv + postgres
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx libglib2.0-0 libpq-dev gcc \
+    libgl1 \
+    libglib2.0-0 \
+    libpq-dev \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -12,5 +15,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Run with uvicorn (multiple workers behind load balancer)
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
