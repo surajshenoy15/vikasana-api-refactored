@@ -24,7 +24,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: admin
-      POSTGRES_PASSWORD: "StrongPass@123"
+      POSTGRES_PASSWORD: "StrongPass123"
       POSTGRES_DB: appdb
     ports:
       - "5433:5432"
