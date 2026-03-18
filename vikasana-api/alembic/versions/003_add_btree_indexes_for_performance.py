@@ -1,9 +1,9 @@
-"""Add B-Tree indexes for currently existing high-traffic tables.
+"""Add B-Tree indexes for currently existing tables.
 
 Revision ID: 003_btree_indexes
 Revises: 002
+Create Date: 2026-02-20
 """
-
 from alembic import op
 
 revision = "003_btree_indexes"
@@ -13,15 +13,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # ── Faculty ──
     op.create_index(
         "ix_faculty_college_active",
         "faculty",
         ["college", "is_active"],
         postgresql_using="btree",
     )
-
-    # ── Admins ──
     op.create_index(
         "ix_admins_email_btree",
         "admins",
