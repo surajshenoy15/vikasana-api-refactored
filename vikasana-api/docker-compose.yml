@@ -8,6 +8,7 @@ services:
     depends_on:
       - postgres
       - redis
+      - minio
     restart: unless-stopped
 
   celery-worker:
@@ -18,6 +19,7 @@ services:
     depends_on:
       - postgres
       - redis
+      - minio
     restart: unless-stopped
 
   postgres:
@@ -39,17 +41,17 @@ services:
     restart: unless-stopped
 
   minio:
-  image: minio/minio
-  command: server /data --console-address ":9001"
-  ports:
-    - "9000:9000"
-    - "9001:9001"
-  environment:
-    MINIO_ROOT_USER: OIUZY5DEWKSXMY2C7P0H
-    MINIO_ROOT_PASSWORD: Fsb3Gg0ivtgoIs+KmMFFXV3+N0pMJRMB5ZgUelDN
-  volumes:
-    - miniodata:/data
-  restart: unless-stopped
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: OIUZY5DEWKSXMY2C7P0H
+      MINIO_ROOT_PASSWORD: Fsb3Gg0ivtgoIs+KmMFFXV3+N0pMJRMB5ZgUelDN
+    volumes:
+      - miniodata:/data
+    restart: unless-stopped
 
   nginx:
     image: nginx:alpine
