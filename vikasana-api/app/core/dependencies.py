@@ -27,32 +27,47 @@ async def get_current_admin(
 ) -> Admin:
     not_authenticated = _not_authenticated_exception()
 
+    print("🔐 get_current_admin called")
+    print("🔐 credentials present:", bool(credentials))
+
     if not credentials:
+        print("❌ No credentials received")
         raise not_authenticated
 
     try:
-        payload = decode_access_token(credentials.credentials)
+        token = credentials.credentials
+        print("🔐 raw token prefix:", token[:30] if token else None)
+
+        payload = decode_access_token(token)
+        print("🔐 decoded payload:", payload)
+
         admin_id = int(payload["sub"])
 
-        # ✅ admin tokens require this
         if payload.get("type") != "access":
+            print("❌ token type invalid:", payload.get("type"))
             raise not_authenticated
 
-    except (JWTError, KeyError, ValueError):
+    except (JWTError, KeyError, ValueError) as e:
+        print("❌ token decode failed:", repr(e))
         raise not_authenticated
 
     result = await db.execute(select(Admin).where(Admin.id == admin_id))
     admin = result.scalar_one_or_none()
 
+    print("🔐 admin found:", bool(admin), "admin_id:", admin_id)
+
     if admin is None:
+        print("❌ admin not found for id:", admin_id)
         raise not_authenticated
 
     if not admin.is_active:
+        print("❌ admin inactive:", admin_id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This admin account has been deactivated",
         )
 
+    print("✅ admin authenticated:", admin_id)
     return admin
 
 
