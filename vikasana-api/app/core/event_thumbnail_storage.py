@@ -1,6 +1,7 @@
 import os
 import uuid
 from datetime import timedelta
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import HTTPException
 
@@ -8,6 +9,25 @@ from app.core.minio_client import get_minio, ensure_bucket
 
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+
+def _rewrite_to_public_base(url: str) -> str:
+    public_base = os.getenv("MINIO_PUBLIC_BASE", "").rstrip("/")
+    if not public_base:
+        return url
+
+    public_parts = urlsplit(public_base)
+    original_parts = urlsplit(url)
+
+    return urlunsplit(
+        (
+            public_parts.scheme,
+            public_parts.netloc,
+            original_parts.path,
+            original_parts.query,
+            original_parts.fragment,
+        )
+    )
 
 
 async def generate_event_thumbnail_presigned_put(
@@ -35,10 +55,15 @@ async def generate_event_thumbnail_presigned_put(
         expires=timedelta(minutes=15),
     )
 
+    # ✅ rewrite internal Docker URL (http://minio:9000/...)
+    #    to public URL (http://31.97.230.171:9000/...)
+    upload_url = _rewrite_to_public_base(upload_url)
+
     public_base = os.getenv("MINIO_PUBLIC_BASE", "").rstrip("/")
     if public_base:
         public_url = f"{public_base}/{bucket}/{object_name}"
     else:
         public_url = minio.presigned_get_object(bucket, object_name)
+        public_url = _rewrite_to_public_base(public_url)
 
     return {"upload_url": upload_url, "public_url": public_url}
