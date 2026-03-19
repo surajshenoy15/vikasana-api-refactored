@@ -33,6 +33,7 @@ from app.core.minio_client import get_minio, ensure_bucket
 
 from app.features.events.models import Event, EventSubmission, EventSubmissionPhoto
 from app.features.students.models import Student
+from app.features.activities.models import StudentActivityStats
 
 # ✅ Activity tracking
 from app.features.activities.models import ActivitySession, ActivitySessionStatus
@@ -538,23 +539,54 @@ async def _calculate_submission_points(
     db: AsyncSession,
     submission: EventSubmission,
     event: Event,
-) -> int:
+) -> tuple[int, dict[int, dict]]:
+    """
+    Returns:
+      total_points,
+      breakdown = {
+        activity_type_id: {
+          "hours": float,
+          "raw_points": int,
+          "already_awarded": int,
+          "remaining_cap": int | None,
+          "points_to_award": int,
+        }
+      }
+
+    Enforces lifetime max_points per activity type using StudentActivityStats.points_awarded.
+    """
+
     activity_type_ids = await _get_event_activity_type_ids(db, event.id)
     if not activity_type_ids:
-        return 0
+        return 0, {}
 
     start_utc, end_utc = _event_window_utc(event)
     if end_utc <= start_utc:
         end_utc = start_utc + timedelta(hours=6)
 
     total_points = 0
+    breakdown: dict[int, dict] = {}
 
     at_q = await db.execute(
         select(ActivityType).where(ActivityType.id.in_(activity_type_ids))
     )
     activity_types = {int(a.id): a for a in at_q.scalars().all()}
 
+    stats_q = await db.execute(
+        select(StudentActivityStats).where(
+            StudentActivityStats.student_id == submission.student_id,
+            StudentActivityStats.activity_type_id.in_(activity_type_ids),
+        )
+    )
+    stats_by_type = {
+        int(s.activity_type_id): s
+        for s in stats_q.scalars().all()
+        if s.activity_type_id is not None
+    }
+
     for at_id in activity_type_ids:
+        at_id = int(at_id)
+
         session_end = func.coalesce(
             ActivitySession.submitted_at,
             ActivitySession.expires_at,
@@ -588,33 +620,57 @@ async def _calculate_submission_points(
         )
 
         hours = float(hrs_q.scalar() or 0.0)
-        if hours <= 0:
-            continue
+        at = activity_types.get(at_id)
 
-        at = activity_types.get(int(at_id))
-        if not at:
+        if not at or hours <= 0:
+            breakdown[at_id] = {
+                "hours": hours,
+                "raw_points": 0,
+                "already_awarded": int(getattr(stats_by_type.get(at_id), "points_awarded", 0) or 0),
+                "remaining_cap": int(getattr(at, "max_points", 0)) if at and getattr(at, "max_points", None) is not None else None,
+                "points_to_award": 0,
+            }
             continue
 
         ppu = getattr(at, "points_per_unit", None)
         hpu = getattr(at, "hours_per_unit", None)
         max_points = getattr(at, "max_points", None)
 
-        points_awarded = 0
+        raw_points = 0
         if ppu is not None and hpu:
             try:
-                points_awarded = int(round((hours / float(hpu)) * float(ppu)))
+                raw_points = int(round((hours / float(hpu)) * float(ppu)))
             except Exception:
-                points_awarded = 0
+                raw_points = 0
+
+        raw_points = max(0, int(raw_points))
+
+        stats_row = stats_by_type.get(at_id)
+        already_awarded = int(getattr(stats_row, "points_awarded", 0) or 0)
 
         if max_points is not None:
             try:
-                points_awarded = min(points_awarded, int(max_points))
+                remaining_cap = max(0, int(max_points) - already_awarded)
             except Exception:
-                pass
+                remaining_cap = 0
+            points_to_award = min(raw_points, remaining_cap)
+        else:
+            remaining_cap = None
+            points_to_award = raw_points
 
-        total_points += max(0, int(points_awarded))
+        points_to_award = max(0, int(points_to_award))
 
-    return total_points
+        breakdown[at_id] = {
+            "hours": hours,
+            "raw_points": raw_points,
+            "already_awarded": already_awarded,
+            "remaining_cap": remaining_cap,
+            "points_to_award": points_to_award,
+        }
+
+        total_points += points_to_award
+
+    return total_points, breakdown
 
 
 async def _credit_submission_points_once(
@@ -622,25 +678,63 @@ async def _credit_submission_points_once(
     submission: EventSubmission,
     event: Event,
 ) -> int:
+    """
+    Credits points only once per submission.
+
+    Also enforces lifetime max per activity type using StudentActivityStats.
+    """
     if bool(getattr(submission, "points_credited", False)):
         return int(getattr(submission, "awarded_points", 0) or 0)
 
-    total_points = await _calculate_submission_points(db, submission, event)
+    total_points, breakdown = await _calculate_submission_points(db, submission, event)
 
     student = await db.get(Student, submission.student_id)
     if not student:
         return 0
+
+    now_utc = datetime.now(timezone.utc)
+
+    for at_id, data in breakdown.items():
+        pts = int(data.get("points_to_award", 0) or 0)
+        hrs = float(data.get("hours", 0.0) or 0.0)
+
+        if pts <= 0 and hrs <= 0:
+            continue
+
+        stats_q = await db.execute(
+            select(StudentActivityStats).where(
+                StudentActivityStats.student_id == submission.student_id,
+                StudentActivityStats.activity_type_id == int(at_id),
+            )
+        )
+        stats_row = stats_q.scalar_one_or_none()
+
+        if stats_row is None:
+            stats_row = StudentActivityStats(
+                student_id=submission.student_id,
+                activity_type_id=int(at_id),
+                total_verified_hours=max(0.0, hrs),
+                points_awarded=max(0, pts),
+                completed_at=now_utc if pts > 0 else None,
+            )
+            db.add(stats_row)
+        else:
+            # keep the highest verified hours seen so far for this activity type
+            existing_hours = float(getattr(stats_row, "total_verified_hours", 0.0) or 0.0)
+            stats_row.total_verified_hours = max(existing_hours, hrs)
+            stats_row.points_awarded = int(getattr(stats_row, "points_awarded", 0) or 0) + max(0, pts)
+            if pts > 0:
+                stats_row.completed_at = now_utc
 
     student.total_points_earned = int(student.total_points_earned or 0) + int(total_points)
     submission.awarded_points = int(total_points)
     submission.points_credited = True
 
     if getattr(submission, "approved_at", None) is None:
-        submission.approved_at = datetime.now(timezone.utc)
+        submission.approved_at = now_utc
 
     await db.commit()
     return total_points
-
 
 async def _eligible_students_from_sessions(
     db: AsyncSession,
