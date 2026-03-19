@@ -1666,53 +1666,21 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # =========================================================
 # ---------------------- STUDENT ---------------------------
 # =========================================================
-async def list_active_events(db: AsyncSession) -> list[dict]:
+async def list_active_events(db: AsyncSession) -> list[Event]:
     """
-    Returns ALL events (upcoming + ongoing + past) so the frontend
-    can classify them into tabs using deriveStatus().
-
-    ✅ Cached in Redis for faster repeated reads
-    ✅ Cache is cleared by create/update/end/delete event functions
+    Returns Event ORM objects so routes can safely pass each item into
+    _event_out_dict(ev), which expects ev.id / ev.title / etc.
     """
-    cache_key = "student:events:all"
-
-    try:
-        cached = await cache_get(cache_key)
-        if cached is not None:
-            return cached
-
-        q = await db.execute(
-            select(Event)
-            .where(Event.event_date.isnot(None))
-            .order_by(Event.event_date.desc(), Event.start_time.asc().nulls_last(), Event.id.desc())
+    q = await db.execute(
+        select(Event)
+        .where(Event.event_date.isnot(None))
+        .order_by(
+            Event.event_date.desc(),
+            Event.start_time.asc().nulls_last(),
+            Event.id.desc(),
         )
-        events = q.scalars().all()
-
-        result = []
-        for ev in events:
-            result.append({
-                "id": ev.id,
-                "title": ev.title,
-                "description": ev.description,
-                "required_photos": ev.required_photos,
-                "is_active": bool(getattr(ev, "is_active", True)),
-                "event_date": ev.event_date.isoformat() if ev.event_date else None,
-                "start_time": str(ev.start_time) if ev.start_time else None,
-                "end_time": str(ev.end_time) if ev.end_time else None,
-                "thumbnail_url": getattr(ev, "thumbnail_url", None),
-                "venue_name": getattr(ev, "venue_name", None),
-                "maps_url": getattr(ev, "maps_url", None),
-                "location_lat": getattr(ev, "location_lat", None),
-                "location_lng": getattr(ev, "location_lng", None),
-                "geo_radius_m": getattr(ev, "geo_radius_m", None),
-            })
-
-        await cache_set(cache_key, result, ttl=300)
-        return result
-
-    except Exception as e:
-        print(f"Error fetching events: {str(e)}")
-        return []
+    )
+    return q.scalars().all()
 
 async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
     q = await db.execute(select(Event).where(Event.id == event_id))
