@@ -828,25 +828,21 @@ async def _infer_activity_type_ids_from_sessions(
 
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     """
-    ✅ FIXED PERMANENTLY:
-    - EventSubmission.status + ActivitySession.status are matched case-insensitively
-      (handles DB enums stored as "APPROVED" etc.)
-    - Uses mapped activity_type_ids; if missing -> infer from APPROVED sessions in window
-    - Computes HOURS by overlap inside event window:
-        overlap = max(0, min(session_end, end_utc) - max(started_at, start_utc))
-      where session_end = coalesce(submitted_at, expires_at, end_utc)  ✅ IMPORTANT FIX
-      (prevents NULL end timestamps from producing 0 rows / 0 hours)
-    - Issues certificate only if hours > 0 for that student + activity_type in window
-    - If mapping exists but yields 0, retries with inferred ids (mapping mismatch safety)
+    Generate certificates ONLY for approved submissions of this event.
+
+    Rules:
+    - Only EventSubmission.status == "approved"
+    - ActivitySession must still be approved
+    - Certificate is created only when admin triggers generation
     """
 
     # -----------------------
-    # Approved submissions
+    # Approved submissions ONLY
     # -----------------------
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.event_id == event.id,
-            func.lower(cast(EventSubmission.status, String)).in_(["approved", "expired"]),
+            func.lower(cast(EventSubmission.status, String)) == "approved",
         )
     )
     submissions = q.scalars().all()
@@ -858,7 +854,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     # -----------------------
     start_utc, end_utc = _event_window_utc(event)
 
-    # Safety if old rows have bad end_time
     if end_utc <= start_utc:
         end_utc = start_utc + timedelta(hours=6)
 
@@ -907,7 +902,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         session_end = func.coalesce(
             ActivitySession.submitted_at,
             ActivitySession.expires_at,
-            end_utc,  # ✅ fallback prevents NULL end from breaking overlap logic
+            end_utc,
         )
 
         hrs_q = await db.execute(
@@ -922,8 +917,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                                     func.least(session_end, end_utc)
                                     - func.greatest(ActivitySession.started_at, start_utc)
                                 ),
-                            )
-                            / 3600.0,
+                            ) / 3600.0,
                         )
                     ),
                     0.0,
@@ -931,11 +925,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             ).where(
                 ActivitySession.student_id == student_id,
                 ActivitySession.activity_type_id == at_id,
-
-                # ✅ FIX: case-insensitive APPROVED match
                 func.lower(cast(ActivitySession.status, String)) == "approved",
-
-                # ✅ must overlap window (use same session_end)
                 ActivitySession.started_at <= end_utc,
                 session_end >= start_utc,
             )
@@ -961,7 +951,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         for at_id in activity_type_ids:
             at_id = int(at_id)
 
-            # already issued?
             ex = await db.execute(
                 select(Certificate.id).where(
                     Certificate.submission_id == sub.id,
@@ -978,7 +967,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             at = at_by_id.get(at_id)
             activity_type_name = (getattr(at, "name", None) or "").strip() or f"Activity Type #{at_id}"
 
-            # points
             points_awarded = 0
             if at:
                 ppu = getattr(at, "points_per_unit", None)
@@ -1162,26 +1150,32 @@ async def regenerate_event_certificates(db: AsyncSession, event_id: int):
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # ✅ Optional: only delete for approved/expired submissions (safer)
+    # delete only certificates belonging to APPROVED submissions of this event
     subq = await db.execute(
         select(EventSubmission.id).where(
             EventSubmission.event_id == event_id,
-            func.lower(cast(EventSubmission.status, String)).in_(["approved", "expired"]),
+            func.lower(cast(EventSubmission.status, String)) == "approved",
         )
     )
     sub_ids = [int(x) for x in subq.scalars().all()]
 
-    if sub_ids:
-        await db.execute(sql_delete(Certificate).where(Certificate.submission_id.in_(sub_ids)))
-        await db.commit()
+    if not sub_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="No approved students found for this event.",
+        )
 
-    # ✅ re-issue
+    await db.execute(
+        sql_delete(Certificate).where(Certificate.submission_id.in_(sub_ids))
+    )
+    await db.commit()
+
     issued = await _issue_certificates_for_event(db, event)
 
     if issued == 0:
         raise HTTPException(
             status_code=400,
-            detail="No certificates generated. Ensure approved submissions exist and approved sessions exist within the event window for the mapped activity types.",
+            detail="No certificates generated. Only approved students are eligible.",
         )
 
     return {"event_id": event_id, "certificates_issued": issued}
