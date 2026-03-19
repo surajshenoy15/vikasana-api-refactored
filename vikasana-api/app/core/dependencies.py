@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
-from app.core.security import decode_access_token
+from app.core.jwt import decode_access_token
 from app.features.auth.models import Admin
 from app.features.faculty.models import Faculty
 from app.features.students.models import Student
