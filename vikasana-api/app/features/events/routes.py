@@ -1,6 +1,6 @@
 # app/routes/events.py  ✅ FULL UPDATED (event photos + gps + clean fix)
 from __future__ import annotations
-
+from app.core.redis import cache_get, cache_set
 from typing import List
 from datetime import datetime, date as date_type, time as time_type
 import math
@@ -135,13 +135,23 @@ def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 # ---------------------- ADMIN -----------------------------
 # =========================================================
 
-@router.post("/admin/events", response_model=EventOut)
-async def admin_create_event_api(
-    payload: EventCreateIn,
+@router.get("/admin/events", response_model=list[EventOut])
+async def admin_list_events_api(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    return await create_event(db, payload)
+    cache_key = "admin:events:list"
+
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    res = await db.execute(select(Event).order_by(Event.id.desc()))
+    events = res.scalars().all()
+    result = [_event_out_dict(ev) for ev in events]
+
+    await cache_set(cache_key, result, ttl=60)
+    return result
 
 
 @router.post("/admin/events/thumbnail-upload", response_model=ThumbnailUploadOut)
@@ -220,7 +230,17 @@ async def student_events(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    return await list_active_events(db)
+    cache_key = "student:events:list"
+
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    events = await list_active_events(db)
+    result = [_event_out_dict(ev) for ev in events]
+
+    await cache_set(cache_key, result, ttl=60)
+    return result
 
 
 @router.get("/student/events/{event_id}", response_model=EventOut)

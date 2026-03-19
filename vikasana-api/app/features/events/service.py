@@ -23,7 +23,7 @@ from app.core.cert_storage import (
     upload_certificate_pdf_bytes,
     presign_certificate_download_url,
 )
-
+from app.core.redis import cache_delete_pattern
 import io
 import os
 import uuid
@@ -687,7 +687,7 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
     ✅ MAIN BUTTON LOGIC (Top approve):
     - Finds students with APPROVED sessions overlapping the event window for mapped activity types
     - Upserts EventSubmission => status="approved", sets submitted_at + approved_at
-    - Generates certificates for them
+    - Does NOT generate certificates automatically
 
     ✅ FIXES:
     - ActivitySession.status matched case-insensitively (handles DB values like "APPROVED")
@@ -715,16 +715,13 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
         session_end = func.coalesce(
             ActivitySession.submitted_at,
             ActivitySession.expires_at,
-            end_utc,  # ✅ critical fallback
+            end_utc,
         )
 
         aq = await db.execute(
             select(func.distinct(ActivitySession.activity_type_id)).where(
-                # ✅ case-insensitive "APPROVED"
                 func.lower(cast(ActivitySession.status, String)) == "approved",
                 ActivitySession.activity_type_id.is_not(None),
-
-                # ✅ overlap (NOT started_at inside window)
                 ActivitySession.started_at <= end_utc,
                 session_end >= start_utc,
             )
@@ -739,7 +736,6 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
             "certificates_issued": 0,
         }
 
-    # ✅ Get eligible students (your helper already uses overlap + NULL-end fallback)
     eligible_student_ids = await _eligible_students_from_sessions(db, event, activity_type_ids)
     eligible_student_ids = sorted({int(x) for x in (eligible_student_ids or []) if x is not None})
 
@@ -772,7 +768,6 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
             db.add(sub)
             submissions_approved += 1
         else:
-            # ✅ normalize: anything that's not already approved -> approve it (expired/pending/rejected/etc.)
             if (sub.status or "").lower() != "approved":
                 sub.status = "approved"
                 if hasattr(sub, "submitted_at") and getattr(sub, "submitted_at", None) is None:
@@ -783,16 +778,12 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
 
     await db.commit()
 
-    # ✅ Issue certificates for approved/expired submissions
-    issued = await _issue_certificates_for_event(db, event)
-
     return {
         "event_id": event_id,
         "eligible_students": len(eligible_student_ids),
         "submissions_approved": submissions_approved,
-        "certificates_issued": issued,
+        "certificates_issued": 0,
     }
-
 
 async def _infer_activity_type_ids_from_sessions(
     db: AsyncSession,
@@ -1250,6 +1241,7 @@ async def create_event(db: AsyncSession, payload) -> dict:
     - No nested transaction
     - Validates ActivityType IDs exist
     - Inserts Event + mappings atomically with ONE commit
+    - Clears Redis cache for admin/student event lists
     """
 
     # ─────────────────────────────────────────────
@@ -1271,12 +1263,10 @@ async def create_event(db: AsyncSession, payload) -> dict:
     end_time: time_type | None = _parse_time(getattr(payload, "end_time", None))
 
     # ✅ if end_time missing → default 24 hours from start_time
-    # (stored as TIME; window helpers treat end<=start as next day)
     if end_time is None:
         end_time = start_time
 
-    # If admin DID provide end_time, validate it
-    # (same-day validation only; cross-midnight support comes from window helper)
+    # If admin provided end_time, validate it
     if getattr(payload, "end_time", None) is not None and end_time <= start_time:
         raise HTTPException(status_code=422, detail="end_time must be after start_time")
 
@@ -1288,7 +1278,7 @@ async def create_event(db: AsyncSession, payload) -> dict:
         raise HTTPException(status_code=422, detail="required_photos must be between 3 and 5")
 
     # ─────────────────────────────────────────────
-    # Activity type ids (ONLY from schema)
+    # Activity type ids
     # ─────────────────────────────────────────────
     ids: List[int] = list(getattr(payload, "activity_type_ids", None) or [])
     ids = sorted({int(x) for x in ids if x is not None and int(x) > 0})
@@ -1304,7 +1294,7 @@ async def create_event(db: AsyncSession, payload) -> dict:
     maps_url = getattr(payload, "maps_url", None) or getattr(payload, "venue_maps_url", None)
 
     # ─────────────────────────────────────────────
-    # Create event + mapping in ONE transaction
+    # Create event + mappings
     # ─────────────────────────────────────────────
     try:
         event = Event(
@@ -1314,7 +1304,7 @@ async def create_event(db: AsyncSession, payload) -> dict:
             is_active=True,
             event_date=event_date,
             start_time=start_time,
-            end_time=end_time,  # ✅ may equal start_time when omitted (means +24h in window helper)
+            end_time=end_time,
             thumbnail_url=getattr(payload, "thumbnail_url", None),
             venue_name=getattr(payload, "venue_name", None),
             maps_url=maps_url,
@@ -1323,12 +1313,18 @@ async def create_event(db: AsyncSession, payload) -> dict:
             geo_radius_m=getattr(payload, "geo_radius_m", None),
         )
         db.add(event)
-        await db.flush()  # ✅ event.id available
+        await db.flush()
 
-        db.add_all([EventActivityType(event_id=event.id, activity_type_id=at_id) for at_id in ids])
+        db.add_all(
+            [EventActivityType(event_id=event.id, activity_type_id=at_id) for at_id in ids]
+        )
 
         await db.commit()
         await db.refresh(event)
+
+        # ✅ clear cached event lists
+        await cache_delete_pattern("admin:events:*")
+        await cache_delete_pattern("student:events:*")
 
         return {
             "id": event.id,
@@ -1356,7 +1352,6 @@ async def create_event(db: AsyncSession, payload) -> dict:
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to create event: {str(e)}")
-    
 
 # =========================================================
 # ---------------------- ADMIN: UPDATE EVENT --------------
@@ -1373,14 +1368,14 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
       - required_photos in [3..5] if provided
       - end_time > start_time (same day)
       - activity_type_ids must exist if provided
+
+    Also:
+      - clears Redis cache for admin/student event lists after successful update
     """
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # -----------------------
-    # Extract incoming fields
-    # -----------------------
     title = getattr(payload, "title", None)
     description = getattr(payload, "description", None)
     thumbnail_url = getattr(payload, "thumbnail_url", None)
@@ -1393,20 +1388,15 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
 
     is_active = getattr(payload, "is_active", None)
 
-    # date/time may come in different keys
     new_event_date = _parse_date(getattr(payload, "event_date", None) or getattr(payload, "date", None))
     new_start_time = _parse_time(getattr(payload, "start_time", None) or getattr(payload, "time", None))
     new_end_time = _parse_time(getattr(payload, "end_time", None))
 
     required_photos_in = getattr(payload, "required_photos", None)
 
-    # activity types (optional)
     activity_type_ids_raw = getattr(payload, "activity_type_ids", None)
-    replace_mappings = activity_type_ids_raw is not None  # if provided, we replace
+    replace_mappings = activity_type_ids_raw is not None
 
-    # -----------------------
-    # Apply updates to model
-    # -----------------------
     if title is not None:
         event.title = str(title).strip()
 
@@ -1434,14 +1424,12 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
     if is_active is not None:
         event.is_active = bool(is_active)
 
-    # required_photos validation
     if required_photos_in is not None:
         rp = int(required_photos_in)
         if rp < 3 or rp > 5:
             raise HTTPException(status_code=422, detail="required_photos must be between 3 and 5")
         event.required_photos = rp
 
-    # apply date/time (partial)
     if new_event_date is not None:
         event.event_date = new_event_date
     if new_start_time is not None:
@@ -1449,7 +1437,6 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
     if new_end_time is not None:
         event.end_time = new_end_time
 
-    # validate time window if any changed OR if existing is incomplete
     if (new_event_date is not None) or (new_start_time is not None) or (new_end_time is not None):
         if not event.event_date:
             raise HTTPException(status_code=422, detail="event_date is required")
@@ -1465,9 +1452,6 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
         if et <= st:
             raise HTTPException(status_code=422, detail="end_time must be after start_time")
 
-    # -----------------------
-    # Replace mappings if provided
-    # -----------------------
     new_ids: list[int] = []
     if replace_mappings:
         new_ids = sorted({int(x) for x in (activity_type_ids_raw or []) if x is not None and int(x) > 0})
@@ -1487,17 +1471,18 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
             await db.rollback()
             raise HTTPException(status_code=500, detail=f"Failed to update activity mappings: {str(e)}")
 
-    # -----------------------
-    # Commit
-    # -----------------------
     try:
         await db.commit()
         await db.refresh(event)
+
+        # ✅ clear cached event lists
+        await cache_delete_pattern("admin:events:*")
+        await cache_delete_pattern("student:events:*")
+
     except SQLAlchemyError as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to update event: {str(e)}")
 
-    # fetch ids if not replaced (for response)
     if not replace_mappings:
         mapped_ids = await _get_event_activity_type_ids(db, event_id)
         new_ids = sorted({int(x) for x in mapped_ids if x is not None})
@@ -1545,6 +1530,11 @@ async def end_event(db: AsyncSession, event_id: int):
 
     await db.commit()
     await db.refresh(event)
+
+    # ✅ clear cached event lists
+    await cache_delete_pattern("admin:events:*")
+    await cache_delete_pattern("student:events:*")
+
     return event
 
 
@@ -1568,6 +1558,9 @@ async def delete_event(db: AsyncSession, event_id: int) -> None:
     await db.execute(sql_delete(Event).where(Event.id == event_id))
     await db.commit()
 
+    # ✅ clear cached event lists
+    await cache_delete_pattern("admin:events:*")
+    await cache_delete_pattern("student:events:*")
 
 
 async def list_event_submissions(db: AsyncSession, event_id: int):
@@ -1626,7 +1619,7 @@ async def approve_submission(db: AsyncSession, submission_id: int):
     await _credit_submission_points_once(db, submission, event)
 
     # generate certificates
-    await _issue_certificates_for_event(db, event)
+    
 
     # reload latest submission
     q = await db.execute(
@@ -1966,7 +1959,7 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
         await _credit_submission_points_once(db, submission, event)
 
         # generate certificates
-        await _issue_certificates_for_event(db, event)
+        
 
     else:
         # Keep in admin review queue
