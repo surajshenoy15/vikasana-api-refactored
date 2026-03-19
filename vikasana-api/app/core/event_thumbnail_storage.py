@@ -1,69 +1,58 @@
+import io
 import os
 import uuid
-from datetime import timedelta
-from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 
 from app.core.minio_client import get_minio, ensure_bucket
 
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
 
 
-def _rewrite_to_public_base(url: str) -> str:
-    public_base = os.getenv("MINIO_PUBLIC_BASE", "").rstrip("/")
-    if not public_base:
-        return url
-
-    public_parts = urlsplit(public_base)
-    original_parts = urlsplit(url)
-
-    return urlunsplit(
-        (
-            public_parts.scheme,
-            public_parts.netloc,
-            original_parts.path,
-            original_parts.query,
-            original_parts.fragment,
-        )
-    )
-
-
-async def generate_event_thumbnail_presigned_put(
-    filename: str,
-    content_type: str,
+async def upload_event_thumbnail_file(
+    file: UploadFile,
     admin_id: int,
 ):
-    if content_type not in ALLOWED_IMAGE_TYPES:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+
+    if file.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid content_type. Allowed: {', '.join(sorted(ALLOWED_IMAGE_TYPES))}",
         )
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    if len(data) > MAX_IMAGE_SIZE:
+        raise HTTPException(status_code=400, detail="File too large. Max size is 5 MB")
 
     minio = get_minio()
 
     bucket = os.getenv("MINIO_BUCKET_EVENT_THUMBNAILS", "vikasana-event-thumbnails")
     ensure_bucket(minio, bucket)
 
-    ext = filename.split(".")[-1].lower() if "." in filename else "jpg"
+    ext = file.filename.split(".")[-1].lower() if "." in file.filename else "jpg"
     object_name = f"thumbnails/{admin_id}/{uuid.uuid4().hex}.{ext}"
 
-    upload_url = minio.presigned_put_object(
-        bucket,
-        object_name,
-        expires=timedelta(minutes=15),
+    minio.put_object(
+        bucket_name=bucket,
+        object_name=object_name,
+        data=io.BytesIO(data),
+        length=len(data),
+        content_type=file.content_type,
     )
 
-    # ✅ rewrite internal Docker URL (http://minio:9000/...)
-    #    to public URL (http://31.97.230.171:9000/...)
-    upload_url = _rewrite_to_public_base(upload_url)
-
     public_base = os.getenv("MINIO_PUBLIC_BASE", "").rstrip("/")
-    if public_base:
-        public_url = f"{public_base}/{bucket}/{object_name}"
-    else:
-        public_url = minio.presigned_get_object(bucket, object_name)
-        public_url = _rewrite_to_public_base(public_url)
+    public_url = f"{public_base}/{bucket}/{object_name}" if public_base else object_name
 
-    return {"upload_url": upload_url, "public_url": public_url}
+    return {
+        "object_name": object_name,
+        "public_url": public_url,
+        "content_type": file.content_type,
+        "size": len(data),
+    }

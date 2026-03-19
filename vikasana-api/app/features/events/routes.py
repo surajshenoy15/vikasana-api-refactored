@@ -25,15 +25,14 @@ from app.features.events.schemas.events import (
     SubmissionOut,
     AdminSubmissionOut,
     RejectIn,
-    ThumbnailUploadUrlIn,
-    ThumbnailUploadUrlOut,
+    
 )
-
+from app.features.events.schemas.upload import ThumbnailUploadOut
 from app.features.certificates.schemas.certificate import StudentCertificateOut
 
 from app.features.events.service import (
     create_event,
-    update_event,  # ✅ use controller update logic
+    update_event,
     delete_event,
     list_active_events,
     register_for_event,
@@ -41,13 +40,13 @@ from app.features.events.service import (
     list_event_submissions,
     approve_submission,
     reject_submission,
-    get_event_thumbnail_upload_url,
     end_event,
     list_student_event_certificates,
     regenerate_event_certificates,
     auto_approve_event_from_sessions,
     get_student_event_draft_progress,
-    _ensure_event_window,  # ✅ enforce upload only during valid event window
+    _ensure_event_window,
+    upload_event_thumbnail_file,
 )
 
 router = APIRouter(tags=["Events"])
@@ -145,16 +144,14 @@ async def admin_create_event_api(
     return await create_event(db, payload)
 
 
-@router.post("/admin/events/thumbnail-upload-url", response_model=ThumbnailUploadUrlOut)
-async def admin_event_thumbnail_upload_url(
-    payload: ThumbnailUploadUrlIn,
-    db: AsyncSession = Depends(get_db),
+@router.post("/admin/events/thumbnail-upload", response_model=ThumbnailUploadOut)
+async def admin_event_thumbnail_upload(
+    file: UploadFile = File(...),
     admin=Depends(get_current_admin),
 ):
-    return await get_event_thumbnail_upload_url(
+    return await upload_event_thumbnail_file(
+        file=file,
         admin_id=admin.id,
-        filename=payload.filename,
-        content_type=payload.content_type,
     )
 
 

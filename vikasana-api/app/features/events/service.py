@@ -24,7 +24,11 @@ from app.core.cert_storage import (
     presign_certificate_download_url,
 )
 
-from app.core.event_thumbnail_storage import generate_event_thumbnail_presigned_put
+import io
+import os
+import uuid
+from fastapi import UploadFile
+from app.core.minio_client import get_minio, ensure_bucket
 
 from app.features.events.models import Event, EventSubmission, EventSubmissionPhoto
 from app.features.students.models import Student
@@ -1187,12 +1191,56 @@ async def regenerate_event_certificates(db: AsyncSession, event_id: int):
 # ---------------------- THUMBNAIL -------------------------
 # =========================================================
 
-async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_type: str):
-    return await generate_event_thumbnail_presigned_put(
-        filename=filename,
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
+
+
+async def upload_event_thumbnail_file(
+    file: UploadFile,
+    admin_id: int,
+):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+
+    content_type = (file.content_type or "").lower().strip()
+    if content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid content_type. Allowed: {', '.join(sorted(ALLOWED_IMAGE_TYPES))}",
+        )
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    if len(data) > MAX_IMAGE_SIZE:
+        raise HTTPException(status_code=400, detail="File too large. Max size is 5 MB")
+
+    minio = get_minio()
+
+    bucket = os.getenv("MINIO_BUCKET_EVENT_THUMBNAILS", "vikasana-event-thumbnails")
+    ensure_bucket(minio, bucket)
+
+    ext = file.filename.split(".")[-1].lower() if "." in file.filename else "jpg"
+    object_name = f"thumbnails/{admin_id}/{uuid.uuid4().hex}.{ext}"
+
+    minio.put_object(
+        bucket_name=bucket,
+        object_name=object_name,
+        data=io.BytesIO(data),
+        length=len(data),
         content_type=content_type,
-        admin_id=admin_id,
     )
+
+    public_base = os.getenv("MINIO_PUBLIC_BASE", "").rstrip("/")
+    public_url = f"{public_base}/{bucket}/{object_name}" if public_base else object_name
+
+    return {
+        "object_name": object_name,
+        "public_url": public_url,
+        "content_type": content_type,
+        "size": len(data),
+    }
 
 
 # =========================================================
