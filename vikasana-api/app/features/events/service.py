@@ -5,6 +5,7 @@ from datetime import datetime, date as date_type, time as time_type, timezone, t
 from zoneinfo import ZoneInfo
 from typing import Any, Optional
 import secrets
+from app.core.redis import cache_get, cache_set
 from urllib.parse import quote
 from app.features.activities.models import ActivityFaceCheck
 from sqlalchemy import delete
@@ -1665,20 +1666,49 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # =========================================================
 # ---------------------- STUDENT ---------------------------
 # =========================================================
-async def list_active_events(db: AsyncSession) -> list[Event]:
+async def list_active_events(db: AsyncSession) -> list[dict]:
     """
     Returns ALL events (upcoming + ongoing + past) so the frontend
     can classify them into tabs using deriveStatus().
-    No time-window filtering here — that was causing empty results.
+
+    ✅ Cached in Redis for faster repeated reads
+    ✅ Cache is cleared by create/update/end/delete event functions
     """
+    cache_key = "student:events:all"
+
     try:
+        cached = await cache_get(cache_key)
+        if cached is not None:
+            return cached
+
         q = await db.execute(
             select(Event)
             .where(Event.event_date.isnot(None))
             .order_by(Event.event_date.desc(), Event.start_time.asc().nulls_last(), Event.id.desc())
         )
         events = q.scalars().all()
-        return events  # ✅ Return ALL, frontend handles Upcoming/Ongoing/Past tabs
+
+        result = []
+        for ev in events:
+            result.append({
+                "id": ev.id,
+                "title": ev.title,
+                "description": ev.description,
+                "required_photos": ev.required_photos,
+                "is_active": bool(getattr(ev, "is_active", True)),
+                "event_date": ev.event_date.isoformat() if ev.event_date else None,
+                "start_time": str(ev.start_time) if ev.start_time else None,
+                "end_time": str(ev.end_time) if ev.end_time else None,
+                "thumbnail_url": getattr(ev, "thumbnail_url", None),
+                "venue_name": getattr(ev, "venue_name", None),
+                "maps_url": getattr(ev, "maps_url", None),
+                "location_lat": getattr(ev, "location_lat", None),
+                "location_lng": getattr(ev, "location_lng", None),
+                "geo_radius_m": getattr(ev, "geo_radius_m", None),
+            })
+
+        await cache_set(cache_key, result, ttl=300)
+        return result
 
     except Exception as e:
         print(f"Error fetching events: {str(e)}")
