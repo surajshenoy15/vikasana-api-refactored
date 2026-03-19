@@ -1233,7 +1233,10 @@ async def upload_event_thumbnail_file(
     )
 
     public_base = os.getenv("MINIO_PUBLIC_BASE", "").rstrip("/")
-    public_url = f"{public_base}/{bucket}/{object_name}" if public_base else object_name
+    if not public_base:
+        public_base = "http://31.97.230.171:9000"
+
+    public_url = f"{public_base}/{bucket}/{object_name}"
 
     return {
         "object_name": object_name,
@@ -1241,7 +1244,6 @@ async def upload_event_thumbnail_file(
         "content_type": content_type,
         "size": len(data),
     }
-
 
 # =========================================================
 # ---------------------- ADMIN -----------------------------
