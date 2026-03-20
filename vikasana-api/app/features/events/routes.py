@@ -1,21 +1,20 @@
-# app/routes/events.py  ✅ FULL UPDATED (event photos + gps + clean fix)
+# app/routes/events.py
 from __future__ import annotations
-from app.core.redis import cache_get, cache_set
-from typing import List
-from datetime import datetime, date as date_type, time as time_type
+
 import math
+from datetime import datetime, date as date_type, time as time_type
+from typing import List
 
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete as sql_delete
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_student, get_current_admin
+from app.core.redis import cache_get, cache_set
 from app.core.activity_storage import upload_activity_image
 
 from app.features.events.models import Event, EventSubmission, EventSubmissionPhoto
-from app.features.events.models import EventActivityType
-
 from app.features.events.schemas.events import (
     EventCreateIn,
     EventOut,
@@ -25,7 +24,6 @@ from app.features.events.schemas.events import (
     SubmissionOut,
     AdminSubmissionOut,
     RejectIn,
-    
 )
 from app.features.events.schemas.upload import ThumbnailUploadOut
 from app.features.certificates.schemas.certificate import StudentCertificateOut
@@ -69,7 +67,10 @@ def _as_naive_datetime_for_end_time(event_date: date_type | None, end_val):
         return end_val.replace(tzinfo=None)
     if isinstance(end_val, time_type):
         if not event_date:
-            raise HTTPException(status_code=422, detail="event_date is required when end_time is a time value")
+            raise HTTPException(
+                status_code=422,
+                detail="event_date is required when end_time is a time value",
+            )
         return datetime.combine(event_date, end_val).replace(tzinfo=None)
     raise HTTPException(status_code=422, detail="Invalid end_time type")
 
@@ -87,14 +88,14 @@ def _event_out_dict(ev: Event) -> dict:
         "event_date": ev.event_date,
         "start_time": ev.start_time,
         "end_time": end_time,
-        "thumbnail_url": ev.thumbnail_url,
+        "thumbnail_url": getattr(ev, "thumbnail_url", None),
         "venue_name": getattr(ev, "venue_name", None),
         "maps_url": getattr(ev, "maps_url", None),
-
-        # ✅ geofence fields
         "location_lat": getattr(ev, "location_lat", None),
         "location_lng": getattr(ev, "location_lng", None),
-        "geo_radius_m": int(getattr(ev, "geo_radius_m", DEFAULT_EVENT_RADIUS_M) or DEFAULT_EVENT_RADIUS_M),
+        "geo_radius_m": int(
+            getattr(ev, "geo_radius_m", DEFAULT_EVENT_RADIUS_M) or DEFAULT_EVENT_RADIUS_M
+        ),
     }
 
 
@@ -154,6 +155,23 @@ async def admin_list_events_api(
     return result
 
 
+@router.post("/admin/events", response_model=EventOut, status_code=201)
+async def admin_create_event_api(
+    payload: EventCreateIn,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    created = await create_event(db, payload)
+
+    # optional cache bust by overwrite-shortening
+    await cache_set("admin:events:list", None, ttl=1)
+    await cache_set("student:events:list", None, ttl=1)
+
+    if isinstance(created, Event):
+        return _event_out_dict(created)
+    return created
+
+
 @router.post("/admin/events/thumbnail-upload", response_model=ThumbnailUploadOut)
 async def admin_event_thumbnail_upload(
     file: UploadFile = File(...),
@@ -172,7 +190,14 @@ async def admin_update_event_api(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    return await update_event(db, event_id, payload)
+    updated = await update_event(db, event_id, payload)
+
+    await cache_set("admin:events:list", None, ttl=1)
+    await cache_set("student:events:list", None, ttl=1)
+
+    if isinstance(updated, Event):
+        return _event_out_dict(updated)
+    return updated
 
 
 @router.delete("/admin/events/{event_id}", status_code=204)
@@ -183,6 +208,10 @@ async def admin_delete_event_api(
 ):
     await delete_event(db, event_id)
 
+    await cache_set("admin:events:list", None, ttl=1)
+    await cache_set("student:events:list", None, ttl=1)
+    return None
+
 
 @router.post("/admin/events/{event_id}/end", response_model=EventOut)
 async def admin_end_event_api(
@@ -190,7 +219,14 @@ async def admin_end_event_api(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    return await end_event(db, event_id)
+    ended = await end_event(db, event_id)
+
+    await cache_set("admin:events:list", None, ttl=1)
+    await cache_set("student:events:list", None, ttl=1)
+
+    if isinstance(ended, Event):
+        return _event_out_dict(ended)
+    return ended
 
 
 @router.post("/admin/events/{event_id}/approve-and-issue")
@@ -209,16 +245,6 @@ async def admin_regenerate_event_certificates(
     admin=Depends(get_current_admin),
 ):
     return await regenerate_event_certificates(db, event_id)
-
-
-@router.get("/admin/events", response_model=list[EventOut])
-async def admin_list_events_api(
-    db: AsyncSession = Depends(get_db),
-    admin=Depends(get_current_admin),
-):
-    res = await db.execute(select(Event).order_by(Event.id.desc()))
-    events = res.scalars().all()
-    return [_event_out_dict(ev) for ev in events]
 
 
 # =========================================================
@@ -256,13 +282,20 @@ async def student_event_detail(
     return _event_out_dict(ev)
 
 
-@router.get("/student/events/{event_id}/certificates", response_model=list[StudentCertificateOut])
+@router.get(
+    "/student/events/{event_id}/certificates",
+    response_model=list[StudentCertificateOut],
+)
 async def student_event_certificates(
     event_id: int,
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    return await list_student_event_certificates(db=db, student_id=student.id, event_id=event_id)
+    return await list_student_event_certificates(
+        db=db,
+        student_id=student.id,
+        event_id=event_id,
+    )
 
 
 @router.post("/student/events/{event_id}/register", response_model=RegisterOut)
@@ -283,18 +316,17 @@ async def student_event_draft(
     return await get_student_event_draft_progress(db, student.id, event_id)
 
 
-# ✅ event submission photos endpoint (uses EventSubmission/EventSubmissionPhoto)
 @router.post("/student/events/submissions/{submission_id}/photos", response_model=PhotosUploadOut)
 async def upload_photos(
     submission_id: int,
     start_seq: int = Query(..., description="Starting sequence number, e.g., 1"),
 
-    # ✅ event-style fields
+    # event-style fields
     images: List[UploadFile] | None = File(None, description="Upload multiple files with key 'images'"),
     lats: List[float] | None = Form(None, description="Latitude per image (same order as images)"),
     lngs: List[float] | None = Form(None, description="Longitude per image (same order as images)"),
 
-    # ✅ legacy/mobile fallback fields
+    # legacy/mobile fallback fields
     image: UploadFile | None = File(None),
     file: UploadFile | None = File(None),
     photo: UploadFile | None = File(None),
@@ -325,10 +357,8 @@ async def upload_photos(
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # ✅ enforce event time window before allowing uploads
     _ensure_event_window(ev)
 
-    # ✅ normalize payload so both old and new app formats work
     normalized_images: list[UploadFile] = []
     normalized_lats: list[float | None] = []
     normalized_lngs: list[float | None] = []
@@ -363,12 +393,15 @@ async def upload_photos(
     if len(normalized_lats) != len(normalized_images) or len(normalized_lngs) != len(normalized_images):
         raise HTTPException(
             status_code=422,
-            detail="lats/lngs count must match number of uploaded images"
+            detail="lats/lngs count must match number of uploaded images",
         )
 
     required_photos = int(getattr(ev, "required_photos", 3) or 3)
     if start_seq < 1 or start_seq > required_photos:
-        raise HTTPException(status_code=400, detail=f"start_seq must be between 1 and {required_photos}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"start_seq must be between 1 and {required_photos}",
+        )
 
     results: List[EventSubmissionPhoto] = []
     seq_no = start_seq
@@ -377,7 +410,6 @@ async def upload_photos(
     target_lng = getattr(ev, "location_lng", None)
     radius_m = float(getattr(ev, "geo_radius_m", DEFAULT_EVENT_RADIUS_M) or DEFAULT_EVENT_RADIUS_M)
 
-    # ✅ if geofence is enabled, GPS is mandatory
     if target_lat is not None and target_lng is not None:
         for i in range(len(normalized_images)):
             if normalized_lats[i] is None or normalized_lngs[i] is None:
