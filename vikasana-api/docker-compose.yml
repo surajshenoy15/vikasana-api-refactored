@@ -1,6 +1,9 @@
+version: "3.9"
+
 services:
   api:
     build: .
+    container_name: vikasana-api
     expose:
       - "8000"
     env_file:
@@ -13,6 +16,7 @@ services:
 
   celery-worker:
     build: .
+    container_name: vikasana-celery-worker
     command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=4
     env_file:
       - .env
@@ -24,6 +28,7 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    container_name: vikasana-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -36,12 +41,14 @@ services:
 
   redis:
     image: redis:7-alpine
+    container_name: vikasana-redis
     ports:
       - "6379:6379"
     restart: unless-stopped
 
   minio:
     image: minio/minio
+    container_name: vikasana-minio
     command: server /data --console-address ":9001"
     ports:
       - "9000:9000"
@@ -55,6 +62,7 @@ services:
 
   nginx:
     image: nginx:alpine
+    container_name: vikasana-nginx
     ports:
       - "8001:80"
     volumes:
