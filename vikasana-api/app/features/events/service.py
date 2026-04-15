@@ -1,4 +1,3 @@
-# app/controllers/events_controller.py
 from __future__ import annotations
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, date as date_type, time as time_type, timezone, timedelta
@@ -71,7 +70,6 @@ def _parse_date(val: Any) -> Optional[date_type]:
         s = val.strip()
         if not s:
             return None
-        # take first 10 chars for YYYY-MM-DD
         try:
             return date_type.fromisoformat(s[:10])
         except Exception:
@@ -128,6 +126,40 @@ def _parse_time(val: Any) -> Optional[time_type]:
 
     return None
 
+
+def _parse_datetime(val: Any) -> Optional[datetime]:
+    """
+    Accepts:
+      - datetime
+      - ISO string like:
+          "2026-04-15T10:30:00+05:30"
+          "2026-04-15T10:30:00Z"
+          "2026-04-15 10:30:00"
+    Returns:
+      - timezone-aware datetime in IST
+    """
+    if val is None:
+        return None
+
+    if isinstance(val, datetime):
+        if val.tzinfo is None:
+            return val.replace(tzinfo=IST)
+        return val.astimezone(IST)
+
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=IST)
+            return dt.astimezone(IST)
+        except Exception:
+            return None
+
+    return None
 
 # # =========================================================
 # ---------------------- TIME HELPERS ----------------------
@@ -250,6 +282,100 @@ def _next_missing_seq(uploaded: set[int], required_photos: int) -> int:
     return required_photos + 1  # means complete
 
 
+# =========================================================
+# --------- ACTUAL HOURS FROM PHOTO TIMESTAMPS ------------
+# =========================================================
+
+async def _calc_actual_hours_from_photos(
+    db: AsyncSession,
+    submission_id: int,
+) -> float:
+    """
+    ✅ Calculate actual student participation hours based on the time difference
+    between the FIRST photo captured_at and the LAST photo captured_at.
+
+    This is the REAL time the student spent at the event.
+    - First photo = student arrived / started
+    - Last photo  = student finished
+
+    Returns hours as a float. Returns 0.0 if < 2 photos or no timestamps.
+    """
+
+    # ── Try EventSubmissionPhoto first (has captured_at or created_at) ──
+    q = await db.execute(
+        select(EventSubmissionPhoto)
+        .where(EventSubmissionPhoto.submission_id == submission_id)
+        .order_by(EventSubmissionPhoto.seq_no.asc())
+    )
+    photos = q.scalars().all()
+
+    if len(photos) < 2:
+        return 0.0
+
+    # Collect timestamps - try captured_at, then created_at, then uploaded_at
+    timestamps: list[datetime] = []
+    for p in photos:
+        ts = (
+            getattr(p, "captured_at", None)
+            or getattr(p, "created_at", None)
+            or getattr(p, "uploaded_at", None)
+        )
+        if ts is not None:
+            if isinstance(ts, datetime):
+                timestamps.append(ts)
+
+    if len(timestamps) < 2:
+        return 0.0
+
+    first_ts = min(timestamps)
+    last_ts = max(timestamps)
+
+    diff_seconds = (last_ts - first_ts).total_seconds()
+
+    # Guard: negative or zero means something is off
+    if diff_seconds <= 0:
+        return 0.0
+
+    return diff_seconds / 3600.0
+
+
+async def _calc_actual_hours_from_activity_photos(
+    db: AsyncSession,
+    session_id: int,
+) -> float:
+    """
+    Fallback: calculate hours from ActivityPhoto.captured_at for a given session.
+    Used when EventSubmissionPhoto timestamps are not available.
+    """
+    q = await db.execute(
+        select(ActivityPhoto)
+        .where(ActivityPhoto.session_id == session_id)
+        .order_by(ActivityPhoto.seq_no.asc())
+    )
+    photos = q.scalars().all()
+
+    if len(photos) < 2:
+        return 0.0
+
+    timestamps: list[datetime] = []
+    for p in photos:
+        ts = getattr(p, "captured_at", None)
+        if ts is not None and isinstance(ts, datetime):
+            timestamps.append(ts)
+
+    if len(timestamps) < 2:
+        return 0.0
+
+    first_ts = min(timestamps)
+    last_ts = max(timestamps)
+
+    diff_seconds = (last_ts - first_ts).total_seconds()
+    if diff_seconds <= 0:
+        return 0.0
+
+    return diff_seconds / 3600.0
+
+
 async def get_student_event_draft_progress(db: AsyncSession, student_id: int, event_id: int) -> dict:
     """
     Returns draft progress so mobile app can resume:
@@ -331,11 +457,19 @@ async def copy_event_photos_to_activity_session(
         _in_geo = getattr(p, "is_in_geofence", None)
         is_in_geofence_val = bool(_in_geo) if _in_geo is not None else True
 
+        # ✅ Preserve the original captured_at from event photo
+        photo_captured_at = (
+            getattr(p, "captured_at", None)
+            or getattr(p, "created_at", None)
+            or getattr(submission, "submitted_at", None)
+            or datetime.now(timezone.utc)
+        )
+
         if already:
             already.image_url = p.image_url
             already.lat = getattr(p, "lat", None)
             already.lng = getattr(p, "lng", None)
-            already.captured_at = getattr(submission, "submitted_at", None) or datetime.now(timezone.utc)
+            already.captured_at = photo_captured_at
             already.distance_m = getattr(p, "distance_m", None)
             already.is_in_geofence = is_in_geofence_val
         else:
@@ -347,7 +481,7 @@ async def copy_event_photos_to_activity_session(
                     image_url=p.image_url,
                     lat=getattr(p, "lat", None),
                     lng=getattr(p, "lng", None),
-                    captured_at=getattr(submission, "submitted_at", None) or datetime.now(timezone.utc),
+                    captured_at=photo_captured_at,
                     sha256=None,
                     distance_m=getattr(p, "distance_m", None),
                     is_in_geofence=is_in_geofence_val,
@@ -424,6 +558,13 @@ async def create_or_update_activity_session_from_submission(
 
     start_utc, end_utc = _event_window_utc(event)
     now_utc = datetime.now(timezone.utc)
+
+    # ✅ Calculate ACTUAL hours from photo timestamps (first photo → last photo)
+    actual_hours = await _calc_actual_hours_from_photos(db, submission.id)
+    # Fallback: if no photo timestamps, use a minimal default (do NOT use full event window)
+    if actual_hours <= 0:
+        actual_hours = 0.0
+
     sessions = []
 
     for at_id in activity_type_ids:
@@ -444,10 +585,8 @@ async def create_or_update_activity_session_from_submission(
                 if session.submitted_at is None:
                     session.submitted_at = getattr(submission, "submitted_at", None) or now_utc
 
-            if session.duration_hours is None:
-                session.duration_hours = max(
-                    0.0, (end_utc - start_utc).total_seconds() / 3600.0
-                )
+            # ✅ Use ACTUAL hours from photo timestamps, not event window
+            session.duration_hours = actual_hours
         else:
             session = ActivitySession(
                 student_id=submission.student_id,
@@ -463,9 +602,8 @@ async def create_or_update_activity_session_from_submission(
                     else None
                 ),
                 status=target_status,
-                duration_hours=max(
-                    0.0, (end_utc - start_utc).total_seconds() / 3600.0
-                ),
+                # ✅ Use ACTUAL hours from photo timestamps
+                duration_hours=actual_hours,
             )
             db.add(session)
             await db.flush()
@@ -535,6 +673,30 @@ async def _get_event_activity_type_ids(db: AsyncSession, event_id: int) -> list[
     )
     return [int(r[0]) for r in aq.all() if r and r[0] is not None]
 
+
+async def _get_actual_hours_for_student_submission(
+    db: AsyncSession,
+    student_id: int,
+    event_id: int,
+) -> float:
+    """
+    ✅ Get the actual hours a student spent, based on photo timestamps.
+    Looks up the EventSubmission for this student+event, then calculates
+    hours from first photo to last photo.
+    """
+    sub_q = await db.execute(
+        select(EventSubmission).where(
+            EventSubmission.event_id == event_id,
+            EventSubmission.student_id == student_id,
+        )
+    )
+    sub = sub_q.scalar_one_or_none()
+    if not sub:
+        return 0.0
+
+    return await _calc_actual_hours_from_photos(db, sub.id)
+
+
 async def _calculate_submission_points(
     db: AsyncSession,
     submission: EventSubmission,
@@ -553,16 +715,20 @@ async def _calculate_submission_points(
         }
       }
 
-    Enforces lifetime max_points per activity type using StudentActivityStats.points_awarded.
+    ✅ UPDATED: Uses ACTUAL hours from photo timestamps (first photo → last photo)
+    instead of event window or session overlap hours.
+
+    Example: 20 hrs_per_unit, 5 points_per_unit
+      → student does 4 hrs across 2 activity types
+      → each gets (4/20)*5 = 1 point → total 2 points
     """
 
     activity_type_ids = await _get_event_activity_type_ids(db, event.id)
     if not activity_type_ids:
         return 0, {}
 
-    start_utc, end_utc = _event_window_utc(event)
-    if end_utc <= start_utc:
-        end_utc = start_utc + timedelta(hours=6)
+    # ✅ Calculate ACTUAL hours from first photo to last photo
+    actual_hours = await _calc_actual_hours_from_photos(db, submission.id)
 
     total_points = 0
     breakdown: dict[int, dict] = {}
@@ -587,39 +753,9 @@ async def _calculate_submission_points(
     for at_id in activity_type_ids:
         at_id = int(at_id)
 
-        session_end = func.coalesce(
-            ActivitySession.submitted_at,
-            ActivitySession.expires_at,
-            end_utc,
-        )
+        # ✅ Use actual_hours (from photo timestamps) for ALL activity types
+        hours = actual_hours
 
-        hrs_q = await db.execute(
-            select(
-                func.coalesce(
-                    func.sum(
-                        func.greatest(
-                            0.0,
-                            func.extract(
-                                "epoch",
-                                (
-                                    func.least(session_end, end_utc)
-                                    - func.greatest(ActivitySession.started_at, start_utc)
-                                ),
-                            ) / 3600.0,
-                        )
-                    ),
-                    0.0,
-                )
-            ).where(
-                ActivitySession.student_id == submission.student_id,
-                ActivitySession.activity_type_id == at_id,
-                func.lower(cast(ActivitySession.status, String)) == "approved",
-                ActivitySession.started_at <= end_utc,
-                session_end >= start_utc,
-            )
-        )
-
-        hours = float(hrs_q.scalar() or 0.0)
         at = activity_types.get(at_id)
 
         if not at or hours <= 0:
@@ -639,6 +775,7 @@ async def _calculate_submission_points(
         raw_points = 0
         if ppu is not None and hpu:
             try:
+                # e.g. hours=4, hpu=20, ppu=5 → (4/20)*5 = 1 point
                 raw_points = int(round((hours / float(hpu)) * float(ppu)))
             except Exception:
                 raw_points = 0
@@ -916,10 +1053,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     """
     Generate certificates ONLY for approved submissions of this event.
 
-    Rules:
-    - Only EventSubmission.status == "approved"
-    - ActivitySession must still be approved
-    - Certificate is created only when admin triggers generation
+    ✅ UPDATED: Uses actual photo-based hours for points calculation on certificates.
     """
 
     # -----------------------
@@ -982,41 +1116,11 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     at_by_id = {int(a.id): a for a in ats}
 
     # -----------------------
-    # Helper: hours overlap
+    # ✅ Helper: ACTUAL hours from photo timestamps
     # -----------------------
-    async def _hours_in_window(student_id: int, at_id: int) -> float:
-        session_end = func.coalesce(
-            ActivitySession.submitted_at,
-            ActivitySession.expires_at,
-            end_utc,
-        )
-
-        hrs_q = await db.execute(
-            select(
-                func.coalesce(
-                    func.sum(
-                        func.greatest(
-                            0.0,
-                            func.extract(
-                                "epoch",
-                                (
-                                    func.least(session_end, end_utc)
-                                    - func.greatest(ActivitySession.started_at, start_utc)
-                                ),
-                            ) / 3600.0,
-                        )
-                    ),
-                    0.0,
-                )
-            ).where(
-                ActivitySession.student_id == student_id,
-                ActivitySession.activity_type_id == at_id,
-                func.lower(cast(ActivitySession.status, String)) == "approved",
-                ActivitySession.started_at <= end_utc,
-                session_end >= start_utc,
-            )
-        )
-        return float(hrs_q.scalar() or 0.0)
+    async def _hours_for_submission(sub: EventSubmission) -> float:
+        """Get actual hours from photo timestamps for this submission."""
+        return await _calc_actual_hours_from_photos(db, sub.id)
 
     # -----------------------
     # Main issue loop
@@ -1034,6 +1138,9 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         student_name = (getattr(student, "name", None) or "Student").strip()
         usn = (getattr(student, "usn", None) or "").strip()
 
+        # ✅ Get actual hours for this student's submission
+        hours = await _hours_for_submission(sub)
+
         for at_id in activity_type_ids:
             at_id = int(at_id)
 
@@ -1046,7 +1153,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             if ex.scalar_one_or_none():
                 continue
 
-            hours = await _hours_in_window(int(sub.student_id), at_id)
             if hours <= 0:
                 continue
 
@@ -1123,6 +1229,9 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 student_name = (getattr(student, "name", None) or "Student").strip()
                 usn = (getattr(student, "usn", None) or "").strip()
 
+                # ✅ Get actual hours for this student's submission
+                hours = await _hours_for_submission(sub)
+
                 for at_id in inferred_ids:
                     at_id = int(at_id)
 
@@ -1135,7 +1244,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                     if ex.scalar_one_or_none():
                         continue
 
-                    hours = await _hours_in_window(int(sub.student_id), at_id)
                     if hours <= 0:
                         continue
 
@@ -1848,6 +1956,9 @@ async def add_photo(
 
     if existing_photo:
         existing_photo.image_url = image_url
+        # ✅ Update captured_at timestamp for this photo
+        if hasattr(existing_photo, "captured_at"):
+            existing_photo.captured_at = datetime.now(timezone.utc)
         await db.commit()
         await db.refresh(existing_photo)
         return existing_photo
@@ -1857,6 +1968,9 @@ async def add_photo(
         seq_no=seq_no,
         image_url=image_url,
     )
+    # ✅ Set captured_at timestamp when photo is first uploaded
+    if hasattr(photo, "captured_at"):
+        photo.captured_at = datetime.now(timezone.utc)
     db.add(photo)
     await db.commit()
     await db.refresh(photo)
@@ -1933,6 +2047,7 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
     await db.refresh(submission)
 
     # Step 2: create activity session in submitted state
+    # ✅ This now uses actual photo timestamp hours (not event window)
     sessions = await create_or_update_activity_session_from_submission(
         db=db,
         submission=submission,
@@ -2048,6 +2163,7 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
             await create_face_check_for_activity_session(db, submission, session)
 
         # ✅ IMPORTANT: credit points to student total only once
+        # ✅ Points are now based on actual photo timestamp difference
         await _credit_submission_points_once(db, submission, event)
 
         # generate certificates
