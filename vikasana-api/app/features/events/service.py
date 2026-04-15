@@ -1,4 +1,3 @@
-event - recent 
 
 # app/controllers/events_controller.py
 from __future__ import annotations
