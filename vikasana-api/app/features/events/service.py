@@ -1,51 +1,45 @@
 from __future__ import annotations
-from sqlalchemy.exc import SQLAlchemyError
-from datetime import datetime, date as date_type, time as time_type, timezone, timedelta
-from zoneinfo import ZoneInfo
-from typing import Any, Optional
+
+import io
+import os
 import secrets
-from app.core.redis import cache_get, cache_set
+import uuid
+from datetime import datetime, date as date_type, time as time_type, timezone, timedelta
+from typing import Any, Optional, List
 from urllib.parse import quote
-from app.features.activities.models import ActivityFaceCheck
-from sqlalchemy import delete
-from typing import List
-from fastapi import HTTPException
+from zoneinfo import ZoneInfo
+
+from fastapi import HTTPException, UploadFile
 from sqlalchemy import select, func, delete as sql_delete, update, cast, String
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 from sqlalchemy.orm import selectinload
-from app.features.activities.models import ActivityPhoto
-from app.features.activities.models import ActivitySession, ActivitySessionStatus
-from app.core.config import settings
-from app.core.cert_sign import sign_cert
+
 from app.core.cert_pdf import build_certificate_pdf
+from app.core.cert_sign import sign_cert
 from app.core.cert_storage import (
     upload_certificate_pdf_bytes,
     presign_certificate_download_url,
 )
-from app.core.redis import cache_delete_pattern
-import io
-import os
-import uuid
-from fastapi import UploadFile
+from app.core.config import settings
 from app.core.minio_client import get_minio, ensure_bucket
+from app.core.redis import cache_delete_pattern, cache_get, cache_set
 
-from app.features.events.models import Event, EventSubmission, EventSubmissionPhoto
-from app.features.students.models import Student
-from app.features.activities.models import StudentActivityStats
-
-# ✅ Activity tracking
-from app.features.activities.models import ActivitySession, ActivitySessionStatus
-from app.features.activities.models import ActivityType
-
-# ✅ Event ↔ ActivityType mapping
-from app.features.events.models import EventActivityType
-
-# ✅ Certificates
+from app.features.activities.models import (
+    ActivityFaceCheck,
+    ActivityPhoto,
+    ActivitySession,
+    ActivitySessionStatus,
+    ActivityType,
+    StudentActivityStats,
+)
 from app.features.certificates.models import Certificate, CertificateCounter
+from app.features.events.models import Event, EventSubmission, EventSubmissionPhoto, EventActivityType
+from app.features.students.models import Student
 
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
 IST = ZoneInfo("Asia/Kolkata")
 
 
@@ -54,12 +48,6 @@ IST = ZoneInfo("Asia/Kolkata")
 # =========================================================
 
 def _parse_date(val: Any) -> Optional[date_type]:
-    """
-    Accepts:
-      - date
-      - datetime
-      - ISO string: "2026-03-01" or "2026-03-01T10:00:00"
-    """
     if val is None:
         return None
     if isinstance(val, date_type) and not isinstance(val, datetime):
@@ -78,14 +66,6 @@ def _parse_date(val: Any) -> Optional[date_type]:
 
 
 def _parse_time(val: Any) -> Optional[time_type]:
-    """
-    Accepts:
-      - time
-      - datetime (uses .time())
-      - strings: "HH:MM", "HH:MM:SS", "HH:MM:SS.sss"
-      - ISO datetime strings: "2026-03-01T12:22:00"
-    Returns: datetime.time or None
-    """
     if val is None:
         return None
 
@@ -100,7 +80,6 @@ def _parse_time(val: Any) -> Optional[time_type]:
         if not s:
             return None
 
-        # ISO datetime → extract time
         if "T" in s or " " in s:
             try:
                 dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
@@ -108,13 +87,11 @@ def _parse_time(val: Any) -> Optional[time_type]:
             except Exception:
                 pass
 
-        # time-only: HH:MM[:SS[.ffffff]]
         try:
             return time_type.fromisoformat(s).replace(tzinfo=None)
         except Exception:
             pass
 
-        # manual fallback
         try:
             parts = s.split(":")
             hh = int(parts[0])
@@ -129,14 +106,7 @@ def _parse_time(val: Any) -> Optional[time_type]:
 
 def _parse_datetime(val: Any) -> Optional[datetime]:
     """
-    Accepts:
-      - datetime
-      - ISO string like:
-          "2026-04-15T10:30:00+05:30"
-          "2026-04-15T10:30:00Z"
-          "2026-04-15 10:30:00"
-    Returns:
-      - timezone-aware datetime in IST
+    Returns timezone-aware datetime in IST.
     """
     if val is None:
         return None
@@ -150,7 +120,6 @@ def _parse_datetime(val: Any) -> Optional[datetime]:
         s = val.strip()
         if not s:
             return None
-
         try:
             dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
             if dt.tzinfo is None:
@@ -161,107 +130,71 @@ def _parse_datetime(val: Any) -> Optional[datetime]:
 
     return None
 
-# # =========================================================
+
+# =========================================================
 # ---------------------- TIME HELPERS ----------------------
 # =========================================================
+
 def _status_lower(col):
-    """Normalize enum/string status columns to lowercase string for safe comparisons."""
     return func.lower(cast(col, String))
 
+
 def _session_is_approved():
-    """Treat APPROVED case-insensitively, compatible with enum/string storage."""
     return _status_lower(ActivitySession.status) == "approved"
 
+
 def _submission_is_approved_or_expired():
-    """EventSubmission can be approved or expired for certificate generation."""
     return _status_lower(EventSubmission.status).in_(["approved", "expired"])
 
 
-
-
-IST = ZoneInfo("Asia/Kolkata")
-
-
 def _now_ist_aware() -> datetime:
-    """Current time in IST (timezone-aware)."""
     return datetime.now(IST)
 
+
 def _to_ist_aware(dt: datetime) -> datetime:
-    # treat naive as IST-local
     if dt.tzinfo is None:
         return dt.replace(tzinfo=IST)
     return dt.astimezone(IST)
 
+
 def _event_window_ist_aware(ev) -> tuple[datetime, datetime]:
-    """
-    Returns (start_ist, end_ist) as timezone-aware IST datetimes.
-
-    ✅ UPDATED:
-    - If end_time is NULL → default start + 24 hours
-    - If end_time <= start_time → treat as next day
-    """
-
     if not ev.event_date:
         raise ValueError("event_date missing")
 
     if not ev.start_time:
         raise ValueError("start_time missing")
 
-    # ─────────────────────────────────────────────
-    # Start datetime
-    # ─────────────────────────────────────────────
     if isinstance(ev.start_time, datetime):
         start_dt = ev.start_time
     else:
         start_dt = datetime.combine(ev.event_date, ev.start_time)
 
     start_ist = _to_ist_aware(start_dt)
-
-    # ─────────────────────────────────────────────
-    # End datetime
-    # ─────────────────────────────────────────────
     end_val = getattr(ev, "end_time", None)
 
-    # ✅ if end_time not provided → default 24 hours
     if end_val is None:
         end_ist = start_ist + timedelta(hours=24)
         return start_ist, end_ist
 
     if isinstance(end_val, datetime):
         end_dt = end_val
-
     elif isinstance(end_val, time_type):
         end_dt = datetime.combine(ev.event_date, end_val)
-
-        # if end <= start => next day
         if end_dt <= datetime.combine(ev.event_date, ev.start_time):
             end_dt = end_dt + timedelta(days=1)
-
     else:
         raise ValueError(f"invalid end_time type: {type(end_val)}")
 
     end_ist = _to_ist_aware(end_dt)
-
     return start_ist, end_ist
 
+
 def _event_window_utc(event) -> tuple[datetime, datetime]:
-    """
-    Returns (start_utc, end_utc) as timezone-aware UTC datetimes.
-    ✅ Use these for DB comparisons against timestamptz columns.
-    """
     start_ist, end_ist = _event_window_ist_aware(event)
     return start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc)
 
 
 def _ensure_event_window(event) -> None:
-    """
-    ✅ Unified window check using the SAME event window logic used for session filtering.
-    Avoids naive datetime bugs and timezone mismatches.
-
-    Raises:
-      403 if event not active / not started / ended
-      400 if window not configured
-    """
     if not getattr(event, "is_active", True):
         raise HTTPException(status_code=403, detail="Event has ended.")
 
@@ -273,115 +206,65 @@ def _ensure_event_window(event) -> None:
 
     if now_ist > end_ist:
         raise HTTPException(status_code=403, detail="Event has ended.")
-    
+
 
 def _next_missing_seq(uploaded: set[int], required_photos: int) -> int:
     for i in range(1, required_photos + 1):
         if i not in uploaded:
             return i
-    return required_photos + 1  # means complete
+    return required_photos + 1
+
+
+def _points_from_duration_hours(duration_hours: float) -> int:
+    """
+    20 hours = 5 points
+    4 hours = 1 point
+    Max 5 points per activity type
+    """
+    if duration_hours <= 0:
+        return 0
+    return max(0, min(int(duration_hours // 4.0), 5))
 
 
 # =========================================================
-# --------- ACTUAL HOURS FROM PHOTO TIMESTAMPS ------------
+# ---------------------- DURATION HELPERS ------------------
 # =========================================================
 
-async def _calc_actual_hours_from_photos(
-    db: AsyncSession,
-    submission_id: int,
-) -> float:
-    """
-    ✅ Calculate actual student participation hours based on the time difference
-    between the FIRST photo captured_at and the LAST photo captured_at.
-
-    This is the REAL time the student spent at the event.
-    - First photo = student arrived / started
-    - Last photo  = student finished
-
-    Returns hours as a float. Returns 0.0 if < 2 photos or no timestamps.
-    """
-
-    # ── Try EventSubmissionPhoto first (has captured_at or created_at) ──
+async def _submission_duration_hours(db: AsyncSession, submission_id: int) -> float:
     q = await db.execute(
-        select(EventSubmissionPhoto)
-        .where(EventSubmissionPhoto.submission_id == submission_id)
-        .order_by(EventSubmissionPhoto.seq_no.asc())
-    )
-    photos = q.scalars().all()
-
-    if len(photos) < 2:
-        return 0.0
-
-    # Collect timestamps - try captured_at, then created_at, then uploaded_at
-    timestamps: list[datetime] = []
-    for p in photos:
-        ts = (
-            getattr(p, "captured_at", None)
-            or getattr(p, "created_at", None)
-            or getattr(p, "uploaded_at", None)
+        select(EventSubmissionPhoto.captured_at)
+        .where(
+            EventSubmissionPhoto.submission_id == submission_id,
+            EventSubmissionPhoto.captured_at.is_not(None),
         )
-        if ts is not None:
-            if isinstance(ts, datetime):
-                timestamps.append(ts)
-
-    if len(timestamps) < 2:
-        return 0.0
-
-    first_ts = min(timestamps)
-    last_ts = max(timestamps)
-
-    diff_seconds = (last_ts - first_ts).total_seconds()
-
-    # Guard: negative or zero means something is off
-    if diff_seconds <= 0:
-        return 0.0
-
-    return diff_seconds / 3600.0
-
-
-async def _calc_actual_hours_from_activity_photos(
-    db: AsyncSession,
-    session_id: int,
-) -> float:
-    """
-    Fallback: calculate hours from ActivityPhoto.captured_at for a given session.
-    Used when EventSubmissionPhoto timestamps are not available.
-    """
-    q = await db.execute(
-        select(ActivityPhoto)
-        .where(ActivityPhoto.session_id == session_id)
-        .order_by(ActivityPhoto.seq_no.asc())
+        .order_by(EventSubmissionPhoto.captured_at.asc())
     )
-    photos = q.scalars().all()
+    times = [r[0] for r in q.all() if r and r[0] is not None]
 
-    if len(photos) < 2:
+    if len(times) < 2:
         return 0.0
 
-    timestamps: list[datetime] = []
-    for p in photos:
-        ts = getattr(p, "captured_at", None)
-        if ts is not None and isinstance(ts, datetime):
-            timestamps.append(ts)
+    first_ts = times[0]
+    last_ts = times[-1]
 
-    if len(timestamps) < 2:
-        return 0.0
+    if first_ts.tzinfo is None:
+        first_ts = first_ts.replace(tzinfo=IST)
+    else:
+        first_ts = first_ts.astimezone(IST)
 
-    first_ts = min(timestamps)
-    last_ts = max(timestamps)
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.replace(tzinfo=IST)
+    else:
+        last_ts = last_ts.astimezone(IST)
 
-    diff_seconds = (last_ts - first_ts).total_seconds()
-    if diff_seconds <= 0:
-        return 0.0
+    return max(0.0, (last_ts - first_ts).total_seconds() / 3600.0)
 
-    return diff_seconds / 3600.0
 
+# =========================================================
+# ---------------------- DRAFT PROGRESS --------------------
+# =========================================================
 
 async def get_student_event_draft_progress(db: AsyncSession, student_id: int, event_id: int) -> dict:
-    """
-    Returns draft progress so mobile app can resume:
-    - which seq_no already uploaded
-    - next_seq_no to capture
-    """
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
@@ -430,6 +313,11 @@ async def get_student_event_draft_progress(db: AsyncSession, student_id: int, ev
         "photos": [{"seq_no": int(r[0]), "image_url": r[1]} for r in rows],
     }
 
+
+# =========================================================
+# ---------------------- PHOTO COPY ------------------------
+# =========================================================
+
 async def copy_event_photos_to_activity_session(
     db: AsyncSession,
     submission: EventSubmission,
@@ -457,19 +345,17 @@ async def copy_event_photos_to_activity_session(
         _in_geo = getattr(p, "is_in_geofence", None)
         is_in_geofence_val = bool(_in_geo) if _in_geo is not None else True
 
-        # ✅ Preserve the original captured_at from event photo
-        photo_captured_at = (
+        actual_captured_at = (
             getattr(p, "captured_at", None)
-            or getattr(p, "created_at", None)
             or getattr(submission, "submitted_at", None)
-            or datetime.now(timezone.utc)
+            or datetime.now(IST)
         )
 
         if already:
             already.image_url = p.image_url
             already.lat = getattr(p, "lat", None)
             already.lng = getattr(p, "lng", None)
-            already.captured_at = photo_captured_at
+            already.captured_at = actual_captured_at
             already.distance_m = getattr(p, "distance_m", None)
             already.is_in_geofence = is_in_geofence_val
         else:
@@ -481,7 +367,7 @@ async def copy_event_photos_to_activity_session(
                     image_url=p.image_url,
                     lat=getattr(p, "lat", None),
                     lng=getattr(p, "lng", None),
-                    captured_at=photo_captured_at,
+                    captured_at=actual_captured_at,
                     sha256=None,
                     distance_m=getattr(p, "distance_m", None),
                     is_in_geofence=is_in_geofence_val,
@@ -491,16 +377,16 @@ async def copy_event_photos_to_activity_session(
 
     await db.commit()
 
+
+# =========================================================
+# ---------------------- FACE CHECK ------------------------
+# =========================================================
+
 async def create_face_check_for_activity_session(
     db: AsyncSession,
     submission: EventSubmission,
     session: ActivitySession,
 ):
-    """
-    Create a basic ActivityFaceCheck so Activity Sessions UI can show a face image.
-
-    Uses the first activity photo as the face-check photo.
-    """
     photo_res = await db.execute(
         select(ActivityPhoto)
         .where(ActivityPhoto.session_id == session.id)
@@ -546,6 +432,11 @@ async def create_face_check_for_activity_session(
 
     await db.commit()
 
+
+# =========================================================
+# ---------------------- SESSION CREATE/UPDATE ------------
+# =========================================================
+
 async def create_or_update_activity_session_from_submission(
     db: AsyncSession,
     submission: EventSubmission,
@@ -558,13 +449,7 @@ async def create_or_update_activity_session_from_submission(
 
     start_utc, end_utc = _event_window_utc(event)
     now_utc = datetime.now(timezone.utc)
-
-    # ✅ Calculate ACTUAL hours from photo timestamps (first photo → last photo)
-    actual_hours = await _calc_actual_hours_from_photos(db, submission.id)
-    # Fallback: if no photo timestamps, use a minimal default (do NOT use full event window)
-    if actual_hours <= 0:
-        actual_hours = 0.0
-
+    actual_duration_hours = await _submission_duration_hours(db, submission.id)
     sessions = []
 
     for at_id in activity_type_ids:
@@ -585,8 +470,7 @@ async def create_or_update_activity_session_from_submission(
                 if session.submitted_at is None:
                     session.submitted_at = getattr(submission, "submitted_at", None) or now_utc
 
-            # ✅ Use ACTUAL hours from photo timestamps, not event window
-            session.duration_hours = actual_hours
+            session.duration_hours = max(0.0, actual_duration_hours)
         else:
             session = ActivitySession(
                 student_id=submission.student_id,
@@ -602,8 +486,7 @@ async def create_or_update_activity_session_from_submission(
                     else None
                 ),
                 status=target_status,
-                # ✅ Use ACTUAL hours from photo timestamps
-                duration_hours=actual_hours,
+                duration_hours=max(0.0, actual_duration_hours),
             )
             db.add(session)
             await db.flush()
@@ -619,16 +502,10 @@ async def create_or_update_activity_session_from_submission(
 # =========================================================
 
 def _month_code(dt: datetime) -> str:
-    return dt.strftime("%b")  # Jan, Feb...
+    return dt.strftime("%b")
 
 
 def _academic_year_from_date(dt: datetime) -> str:
-    """
-    Academic year in India typically: Jun -> May
-    Example:
-      Feb 2025 => 2024-25
-      Jul 2025 => 2025-26
-    """
     y = dt.year
     m = dt.month
     start_year = y if m >= 6 else (y - 1)
@@ -637,11 +514,6 @@ def _academic_year_from_date(dt: datetime) -> str:
 
 
 async def _next_certificate_no(db: AsyncSession, academic_year: str, dt: datetime) -> str:
-    """
-    BG/VF/{MONTH_CODE}{SEQ}/{ACADEMIC_YEAR}
-    Example: BG/VF/Jan619/2024-25
-    Uses row lock to avoid duplicate seq in concurrent generations.
-    """
     m = _month_code(dt)
 
     stmt = (
@@ -674,69 +546,20 @@ async def _get_event_activity_type_ids(db: AsyncSession, event_id: int) -> list[
     return [int(r[0]) for r in aq.all() if r and r[0] is not None]
 
 
-async def _get_actual_hours_for_student_submission(
-    db: AsyncSession,
-    student_id: int,
-    event_id: int,
-) -> float:
-    """
-    ✅ Get the actual hours a student spent, based on photo timestamps.
-    Looks up the EventSubmission for this student+event, then calculates
-    hours from first photo to last photo.
-    """
-    sub_q = await db.execute(
-        select(EventSubmission).where(
-            EventSubmission.event_id == event_id,
-            EventSubmission.student_id == student_id,
-        )
-    )
-    sub = sub_q.scalar_one_or_none()
-    if not sub:
-        return 0.0
-
-    return await _calc_actual_hours_from_photos(db, sub.id)
-
-
 async def _calculate_submission_points(
     db: AsyncSession,
     submission: EventSubmission,
     event: Event,
 ) -> tuple[int, dict[int, dict]]:
-    """
-    Returns:
-      total_points,
-      breakdown = {
-        activity_type_id: {
-          "hours": float,
-          "raw_points": int,
-          "already_awarded": int,
-          "remaining_cap": int | None,
-          "points_to_award": int,
-        }
-      }
-
-    ✅ UPDATED: Uses ACTUAL hours from photo timestamps (first photo → last photo)
-    instead of event window or session overlap hours.
-
-    Example: 20 hrs_per_unit, 5 points_per_unit
-      → student does 4 hrs across 2 activity types
-      → each gets (4/20)*5 = 1 point → total 2 points
-    """
-
     activity_type_ids = await _get_event_activity_type_ids(db, event.id)
     if not activity_type_ids:
         return 0, {}
 
-    # ✅ Calculate ACTUAL hours from first photo to last photo
-    actual_hours = await _calc_actual_hours_from_photos(db, submission.id)
+    duration_hours = await _submission_duration_hours(db, submission.id)
+    points_each = _points_from_duration_hours(duration_hours)
 
     total_points = 0
     breakdown: dict[int, dict] = {}
-
-    at_q = await db.execute(
-        select(ActivityType).where(ActivityType.id.in_(activity_type_ids))
-    )
-    activity_types = {int(a.id): a for a in at_q.scalars().all()}
 
     stats_q = await db.execute(
         select(StudentActivityStats).where(
@@ -752,60 +575,17 @@ async def _calculate_submission_points(
 
     for at_id in activity_type_ids:
         at_id = int(at_id)
-
-        # ✅ Use actual_hours (from photo timestamps) for ALL activity types
-        hours = actual_hours
-
-        at = activity_types.get(at_id)
-
-        if not at or hours <= 0:
-            breakdown[at_id] = {
-                "hours": hours,
-                "raw_points": 0,
-                "already_awarded": int(getattr(stats_by_type.get(at_id), "points_awarded", 0) or 0),
-                "remaining_cap": int(getattr(at, "max_points", 0)) if at and getattr(at, "max_points", None) is not None else None,
-                "points_to_award": 0,
-            }
-            continue
-
-        ppu = getattr(at, "points_per_unit", None)
-        hpu = getattr(at, "hours_per_unit", None)
-        max_points = getattr(at, "max_points", None)
-
-        raw_points = 0
-        if ppu is not None and hpu:
-            try:
-                # e.g. hours=4, hpu=20, ppu=5 → (4/20)*5 = 1 point
-                raw_points = int(round((hours / float(hpu)) * float(ppu)))
-            except Exception:
-                raw_points = 0
-
-        raw_points = max(0, int(raw_points))
-
         stats_row = stats_by_type.get(at_id)
         already_awarded = int(getattr(stats_row, "points_awarded", 0) or 0)
 
-        if max_points is not None:
-            try:
-                remaining_cap = max(0, int(max_points) - already_awarded)
-            except Exception:
-                remaining_cap = 0
-            points_to_award = min(raw_points, remaining_cap)
-        else:
-            remaining_cap = None
-            points_to_award = raw_points
-
-        points_to_award = max(0, int(points_to_award))
-
         breakdown[at_id] = {
-            "hours": hours,
-            "raw_points": raw_points,
+            "hours": duration_hours,
+            "raw_points": points_each,
             "already_awarded": already_awarded,
-            "remaining_cap": remaining_cap,
-            "points_to_award": points_to_award,
+            "remaining_cap": None,
+            "points_to_award": points_each,
         }
-
-        total_points += points_to_award
+        total_points += points_each
 
     return total_points, breakdown
 
@@ -815,11 +595,6 @@ async def _credit_submission_points_once(
     submission: EventSubmission,
     event: Event,
 ) -> int:
-    """
-    Credits points only once per submission.
-
-    Also enforces lifetime max per activity type using StudentActivityStats.
-    """
     if bool(getattr(submission, "points_credited", False)):
         return int(getattr(submission, "awarded_points", 0) or 0)
 
@@ -834,9 +609,6 @@ async def _credit_submission_points_once(
     for at_id, data in breakdown.items():
         pts = int(data.get("points_to_award", 0) or 0)
         hrs = float(data.get("hours", 0.0) or 0.0)
-
-        if pts <= 0 and hrs <= 0:
-            continue
 
         stats_q = await db.execute(
             select(StudentActivityStats).where(
@@ -856,10 +628,12 @@ async def _credit_submission_points_once(
             )
             db.add(stats_row)
         else:
-            # keep the highest verified hours seen so far for this activity type
             existing_hours = float(getattr(stats_row, "total_verified_hours", 0.0) or 0.0)
-            stats_row.total_verified_hours = max(existing_hours, hrs)
-            stats_row.points_awarded = int(getattr(stats_row, "points_awarded", 0) or 0) + max(0, pts)
+            existing_points = int(getattr(stats_row, "points_awarded", 0) or 0)
+
+            stats_row.total_verified_hours = existing_hours + max(0.0, hrs)
+            stats_row.points_awarded = existing_points + max(0, pts)
+
             if pts > 0:
                 stats_row.completed_at = now_utc
 
@@ -873,21 +647,16 @@ async def _credit_submission_points_once(
     await db.commit()
     return total_points
 
+
+# =========================================================
+# ---------------------- ELIGIBILITY -----------------------
+# =========================================================
+
 async def _eligible_students_from_sessions(
     db: AsyncSession,
     event: Event,
     activity_type_ids: list[int],
 ) -> list[int]:
-    """
-    ✅ Students eligible for auto-approval:
-    - Have APPROVED ActivitySession (case-insensitive)
-    - Session.activity_type_id in event mapped ids
-    - Session overlaps the event window (not just started_at inside)
-      overlap condition:
-        started_at <= end_utc AND session_end >= start_utc
-      where session_end = coalesce(submitted_at, expires_at, end_utc)
-    """
-
     if not activity_type_ids:
         return []
 
@@ -898,15 +667,13 @@ async def _eligible_students_from_sessions(
     session_end = func.coalesce(
         ActivitySession.submitted_at,
         ActivitySession.expires_at,
-        end_utc,  # ✅ fallback so NULL doesn't break overlap logic
+        end_utc,
     )
 
     q = await db.execute(
         select(func.distinct(ActivitySession.student_id)).where(
             func.lower(cast(ActivitySession.status, String)) == "approved",
             ActivitySession.activity_type_id.in_(activity_type_ids),
-
-            # ✅ overlap (same as certificate logic)
             ActivitySession.started_at <= end_utc,
             session_end >= start_utc,
         )
@@ -914,42 +681,25 @@ async def _eligible_students_from_sessions(
 
     return [int(r[0]) for r in q.all() if r and r[0] is not None]
 
+
 async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> dict:
-    """
-    ✅ MAIN BUTTON LOGIC (Top approve):
-    - Finds students with APPROVED sessions overlapping the event window for mapped activity types
-    - Upserts EventSubmission => status="approved", sets submitted_at + approved_at
-    - Does NOT generate certificates automatically
-
-    ✅ FIXES:
-    - ActivitySession.status matched case-insensitively (handles DB values like "APPROVED")
-    - Fallback activity-type inference uses OVERLAP logic (not started_at-only)
-    - Uses session_end = coalesce(submitted_at, expires_at, end_utc) to avoid NULL-end killing matches
-    - Treats expired/pending submissions as re-approvable if student is eligible
-    - Uses consistent UTC window logic
-    """
-
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # Event window (UTC)
     start_utc, end_utc = _event_window_utc(event)
     if end_utc <= start_utc:
         end_utc = start_utc + timedelta(hours=6)
 
-    # ✅ Try mapped activity types first
     mapped_ids = await _get_event_activity_type_ids(db, event_id)
     activity_type_ids = sorted({int(x) for x in mapped_ids if x is not None})
 
-    # ✅ FALLBACK: infer activity types from APPROVED sessions OVERLAPPING the window
     if not activity_type_ids:
         session_end = func.coalesce(
             ActivitySession.submitted_at,
             ActivitySession.expires_at,
             end_utc,
         )
-
         aq = await db.execute(
             select(func.distinct(ActivitySession.activity_type_id)).where(
                 func.lower(cast(ActivitySession.status, String)) == "approved",
@@ -1017,31 +767,22 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
         "certificates_issued": 0,
     }
 
+
 async def _infer_activity_type_ids_from_sessions(
     db: AsyncSession,
     start_utc: datetime,
     end_utc: datetime,
 ) -> list[int]:
-    """
-    Infer activity types from APPROVED sessions overlapping the event window.
-
-    ✅ FIX:
-    - Uses session_end fallback = coalesce(submitted_at, expires_at, end_utc)
-      so NULL end timestamps don't kill overlap filters.
-    - Uses case-insensitive APPROVED match.
-    """
     session_end = func.coalesce(
         ActivitySession.submitted_at,
         ActivitySession.expires_at,
-        end_utc,  # ✅ fallback prevents NULL end from breaking overlap logic
+        end_utc,
     )
 
     aq = await db.execute(
         select(func.distinct(ActivitySession.activity_type_id)).where(
             _session_is_approved(),
             ActivitySession.activity_type_id.is_not(None),
-
-            # ✅ overlap logic
             ActivitySession.started_at <= end_utc,
             session_end >= start_utc,
         )
@@ -1049,16 +790,11 @@ async def _infer_activity_type_ids_from_sessions(
     return [int(r[0]) for r in aq.all() if r and r[0] is not None]
 
 
+# =========================================================
+# ---------------------- CERT ISSUE ------------------------
+# =========================================================
+
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
-    """
-    Generate certificates ONLY for approved submissions of this event.
-
-    ✅ UPDATED: Uses actual photo-based hours for points calculation on certificates.
-    """
-
-    # -----------------------
-    # Approved submissions ONLY
-    # -----------------------
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.event_id == event.id,
@@ -1069,19 +805,12 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     if not submissions:
         return 0
 
-    # -----------------------
-    # Event window in UTC
-    # -----------------------
-    start_utc, end_utc = _event_window_utc(event)
-
-    if end_utc <= start_utc:
-        end_utc = start_utc + timedelta(hours=6)
-
-    # -----------------------
-    # Activity types (mapped -> else infer)
-    # -----------------------
     mapped_ids = await _get_event_activity_type_ids(db, event.id)
     activity_type_ids = sorted({int(x) for x in mapped_ids if x is not None})
+
+    start_utc, end_utc = _event_window_utc(event)
+    if end_utc <= start_utc:
+        end_utc = start_utc + timedelta(hours=6)
 
     if not activity_type_ids:
         activity_type_ids = await _infer_activity_type_ids_from_sessions(db, start_utc, end_utc)
@@ -1092,9 +821,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             detail="No activity types found for this event (mapping empty and no approved sessions in event window).",
         )
 
-    # -----------------------
-    # Caches
-    # -----------------------
     now_utc = datetime.now(timezone.utc)
     now_ist = _now_ist_aware()
     academic_year = _academic_year_from_date(now_ist)
@@ -1115,16 +841,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     ats = at_q.scalars().all()
     at_by_id = {int(a.id): a for a in ats}
 
-    # -----------------------
-    # ✅ Helper: ACTUAL hours from photo timestamps
-    # -----------------------
-    async def _hours_for_submission(sub: EventSubmission) -> float:
-        """Get actual hours from photo timestamps for this submission."""
-        return await _calc_actual_hours_from_photos(db, sub.id)
-
-    # -----------------------
-    # Main issue loop
-    # -----------------------
     issued = 0
 
     for sub in submissions:
@@ -1138,8 +854,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         student_name = (getattr(student, "name", None) or "Student").strip()
         usn = (getattr(student, "usn", None) or "").strip()
 
-        # ✅ Get actual hours for this student's submission
-        hours = await _hours_for_submission(sub)
+        duration_hours = await _submission_duration_hours(db, sub.id)
+        points_awarded = _points_from_duration_hours(duration_hours)
 
         for at_id in activity_type_ids:
             at_id = int(at_id)
@@ -1153,21 +869,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             if ex.scalar_one_or_none():
                 continue
 
-            if hours <= 0:
-                continue
-
             at = at_by_id.get(at_id)
             activity_type_name = (getattr(at, "name", None) or "").strip() or f"Activity Type #{at_id}"
-
-            points_awarded = 0
-            if at:
-                ppu = getattr(at, "points_per_unit", None)
-                hpu = getattr(at, "hours_per_unit", None)
-                if ppu is not None and hpu:
-                    try:
-                        points_awarded = int(round((hours / float(hpu)) * float(ppu)))
-                    except Exception:
-                        points_awarded = 0
 
             cert_no = await _next_certificate_no(db, academic_year, now_ist)
 
@@ -1202,106 +905,14 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
             object_key = upload_certificate_pdf_bytes(cert.id, pdf_bytes)
             cert.pdf_path = object_key
-
             issued += 1
-
-    # -----------------------
-    # Mapping mismatch retry
-    # -----------------------
-    if issued == 0 and mapped_ids:
-        inferred_ids = await _infer_activity_type_ids_from_sessions(db, start_utc, end_utc)
-        inferred_ids = sorted({int(i) for i in inferred_ids if i is not None and int(i) > 0})
-        inferred_ids = [i for i in inferred_ids if i not in activity_type_ids]
-
-        if inferred_ids:
-            at_q2 = await db.execute(select(ActivityType).where(ActivityType.id.in_(inferred_ids)))
-            for a in at_q2.scalars().all():
-                at_by_id[int(a.id)] = a
-
-            for sub in submissions:
-                if sub.student_id is None:
-                    continue
-
-                student = student_by_id.get(int(sub.student_id))
-                if not student:
-                    continue
-
-                student_name = (getattr(student, "name", None) or "Student").strip()
-                usn = (getattr(student, "usn", None) or "").strip()
-
-                # ✅ Get actual hours for this student's submission
-                hours = await _hours_for_submission(sub)
-
-                for at_id in inferred_ids:
-                    at_id = int(at_id)
-
-                    ex = await db.execute(
-                        select(Certificate.id).where(
-                            Certificate.submission_id == sub.id,
-                            Certificate.activity_type_id == at_id,
-                        )
-                    )
-                    if ex.scalar_one_or_none():
-                        continue
-
-                    if hours <= 0:
-                        continue
-
-                    at = at_by_id.get(at_id)
-                    activity_type_name = (getattr(at, "name", None) or "").strip() or f"Activity Type #{at_id}"
-
-                    points_awarded = 0
-                    if at:
-                        ppu = getattr(at, "points_per_unit", None)
-                        hpu = getattr(at, "hours_per_unit", None)
-                        if ppu is not None and hpu:
-                            try:
-                                points_awarded = int(round((hours / float(hpu)) * float(ppu)))
-                            except Exception:
-                                points_awarded = 0
-
-                    cert_no = await _next_certificate_no(db, academic_year, now_ist)
-
-                    cert = Certificate(
-                        certificate_no=cert_no,
-                        submission_id=sub.id,
-                        student_id=sub.student_id,
-                        event_id=event.id,
-                        activity_type_id=at_id,
-                        issued_at=now_utc,
-                    )
-                    db.add(cert)
-                    await db.flush()
-
-                    sig = sign_cert(cert.certificate_no)
-                    verify_url = (
-                        f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify"
-                        f"?cert_id={quote(cert.certificate_no)}&sig={quote(sig)}"
-                    )
-
-                    pdf_bytes = build_certificate_pdf(
-                        template_pdf_path=settings.CERT_TEMPLATE_PDF_PATH,
-                        certificate_no=cert.certificate_no,
-                        issue_date=(cert.issued_at.date().isoformat() if cert.issued_at else now_ist.date().isoformat()),
-                        student_name=student_name,
-                        usn=usn,
-                        activity_type=activity_type_name,
-                        venue_name=venue_name,
-                        activity_points=int(points_awarded),
-                        verify_url=verify_url,
-                    )
-
-                    object_key = upload_certificate_pdf_bytes(cert.id, pdf_bytes)
-                    cert.pdf_path = object_key
-
-                    issued += 1
 
     await db.commit()
     return issued
 
 
 # =========================================================
-# ---------------------- CERT LIST (STUDENT) ----------------
+# ---------------------- CERT LIST -------------------------
 # =========================================================
 
 async def list_student_event_certificates(db: AsyncSession, student_id: int, event_id: int) -> list[dict]:
@@ -1344,7 +955,6 @@ async def regenerate_event_certificates(db: AsyncSession, event_id: int):
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # delete only certificates belonging to APPROVED submissions of this event
     subq = await db.execute(
         select(EventSubmission.id).where(
             EventSubmission.event_id == event_id,
@@ -1354,23 +964,15 @@ async def regenerate_event_certificates(db: AsyncSession, event_id: int):
     sub_ids = [int(x) for x in subq.scalars().all()]
 
     if not sub_ids:
-        raise HTTPException(
-            status_code=400,
-            detail="No approved students found for this event.",
-        )
+        raise HTTPException(status_code=400, detail="No approved students found for this event.")
 
-    await db.execute(
-        sql_delete(Certificate).where(Certificate.submission_id.in_(sub_ids))
-    )
+    await db.execute(sql_delete(Certificate).where(Certificate.submission_id.in_(sub_ids)))
     await db.commit()
 
     issued = await _issue_certificates_for_event(db, event)
 
     if issued == 0:
-        raise HTTPException(
-            status_code=400,
-            detail="No certificates generated. Only approved students are eligible.",
-        )
+        raise HTTPException(status_code=400, detail="No certificates generated. Only approved students are eligible.")
 
     return {"event_id": event_id, "certificates_issued": issued}
 
@@ -1379,14 +981,7 @@ async def regenerate_event_certificates(db: AsyncSession, event_id: int):
 # ---------------------- THUMBNAIL -------------------------
 # =========================================================
 
-ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
-MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
-
-
-async def upload_event_thumbnail_file(
-    file: UploadFile,
-    admin_id: int,
-):
+async def upload_event_thumbnail_file(file: UploadFile, admin_id: int):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
 
@@ -1405,7 +1000,6 @@ async def upload_event_thumbnail_file(
         raise HTTPException(status_code=400, detail="File too large. Max size is 5 MB")
 
     minio = get_minio()
-
     bucket = os.getenv("MINIO_BUCKET_EVENT_THUMBNAILS", "vikasana-event-thumbnails")
     ensure_bucket(minio, bucket)
 
@@ -1420,10 +1014,7 @@ async def upload_event_thumbnail_file(
         content_type=content_type,
     )
 
-    public_base = os.getenv("MINIO_PUBLIC_BASE", "").rstrip("/")
-    if not public_base:
-        public_base = "http://31.97.230.171:9000"
-
+    public_base = os.getenv("MINIO_PUBLIC_BASE", "").rstrip("/") or "http://31.97.230.171:9000"
     public_url = f"{public_base}/{bucket}/{object_name}"
 
     return {
@@ -1433,23 +1024,12 @@ async def upload_event_thumbnail_file(
         "size": len(data),
     }
 
+
 # =========================================================
 # ---------------------- ADMIN -----------------------------
 # =========================================================
-async def create_event(db: AsyncSession, payload) -> dict:
-    """
-    ✅ UPDATED create_event:
-    - end_time is OPTIONAL
-    - if end_time missing → defaults to +24 hours from start_time (window logic handles next-day)
-    - No nested transaction
-    - Validates ActivityType IDs exist
-    - Inserts Event + mappings atomically with ONE commit
-    - Clears Redis cache for admin/student event lists
-    """
 
-    # ─────────────────────────────────────────────
-    # Parse date/time
-    # ─────────────────────────────────────────────
+async def create_event(db: AsyncSession, payload) -> dict:
     event_date: date_type | None = _parse_date(
         getattr(payload, "event_date", None) or getattr(payload, "date", None)
     )
@@ -1462,27 +1042,17 @@ async def create_event(db: AsyncSession, payload) -> dict:
     if start_time is None:
         raise HTTPException(status_code=422, detail="start_time is required (HH:MM)")
 
-    # ✅ end_time OPTIONAL
     end_time: time_type | None = _parse_time(getattr(payload, "end_time", None))
-
-    # ✅ if end_time missing → default 24 hours from start_time
     if end_time is None:
         end_time = start_time
 
-    # If admin provided end_time, validate it
     if getattr(payload, "end_time", None) is not None and end_time <= start_time:
         raise HTTPException(status_code=422, detail="end_time must be after start_time")
 
-    # ─────────────────────────────────────────────
-    # required_photos safety
-    # ─────────────────────────────────────────────
     required_photos = int(getattr(payload, "required_photos", 3) or 3)
     if required_photos < 3 or required_photos > 5:
         raise HTTPException(status_code=422, detail="required_photos must be between 3 and 5")
 
-    # ─────────────────────────────────────────────
-    # Activity type ids
-    # ─────────────────────────────────────────────
     ids: List[int] = list(getattr(payload, "activity_type_ids", None) or [])
     ids = sorted({int(x) for x in ids if x is not None and int(x) > 0})
     if not ids:
@@ -1496,9 +1066,6 @@ async def create_event(db: AsyncSession, payload) -> dict:
 
     maps_url = getattr(payload, "maps_url", None) or getattr(payload, "venue_maps_url", None)
 
-    # ─────────────────────────────────────────────
-    # Create event + mappings
-    # ─────────────────────────────────────────────
     try:
         event = Event(
             title=str(getattr(payload, "title", "")).strip(),
@@ -1518,14 +1085,11 @@ async def create_event(db: AsyncSession, payload) -> dict:
         db.add(event)
         await db.flush()
 
-        db.add_all(
-            [EventActivityType(event_id=event.id, activity_type_id=at_id) for at_id in ids]
-        )
+        db.add_all([EventActivityType(event_id=event.id, activity_type_id=at_id) for at_id in ids])
 
         await db.commit()
         await db.refresh(event)
 
-        # ✅ clear cached event lists
         await cache_delete_pattern("admin:events:*")
         await cache_delete_pattern("student:events:*")
 
@@ -1556,25 +1120,8 @@ async def create_event(db: AsyncSession, payload) -> dict:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to create event: {str(e)}")
 
-# =========================================================
-# ---------------------- ADMIN: UPDATE EVENT --------------
-# =========================================================
+
 async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
-    """
-    ✅ Update event + (optionally) replace Event ↔ ActivityType mappings.
-
-    Partial update:
-      - only fields present in payload are applied
-      - if activity_type_ids is provided, mappings are replaced
-
-    Validations:
-      - required_photos in [3..5] if provided
-      - end_time > start_time (same day)
-      - activity_type_ids must exist if provided
-
-    Also:
-      - clears Redis cache for admin/student event lists after successful update
-    """
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
@@ -1588,13 +1135,11 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
     location_lat = getattr(payload, "location_lat", None)
     location_lng = getattr(payload, "location_lng", None)
     geo_radius_m = getattr(payload, "geo_radius_m", None)
-
     is_active = getattr(payload, "is_active", None)
 
     new_event_date = _parse_date(getattr(payload, "event_date", None) or getattr(payload, "date", None))
     new_start_time = _parse_time(getattr(payload, "start_time", None) or getattr(payload, "time", None))
     new_end_time = _parse_time(getattr(payload, "end_time", None))
-
     required_photos_in = getattr(payload, "required_photos", None)
 
     activity_type_ids_raw = getattr(payload, "activity_type_ids", None)
@@ -1602,28 +1147,20 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
 
     if title is not None:
         event.title = str(title).strip()
-
     if description is not None:
         event.description = description or None
-
     if thumbnail_url is not None:
         event.thumbnail_url = thumbnail_url or None
-
     if venue_name is not None:
         event.venue_name = venue_name or None
-
     if maps_url is not None:
         event.maps_url = maps_url or None
-
     if location_lat is not None:
         event.location_lat = location_lat
-
     if location_lng is not None:
         event.location_lng = location_lng
-
     if geo_radius_m is not None:
         event.geo_radius_m = geo_radius_m
-
     if is_active is not None:
         event.is_active = bool(is_active)
 
@@ -1678,7 +1215,6 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
         await db.commit()
         await db.refresh(event)
 
-        # ✅ clear cached event lists
         await cache_delete_pattern("admin:events:*")
         await cache_delete_pattern("student:events:*")
 
@@ -1707,21 +1243,17 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
         "geo_radius_m": getattr(event, "geo_radius_m", None),
         "activity_type_ids": new_ids,
     }
-    
+
 
 async def end_event(db: AsyncSession, event_id: int):
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # ✅ set inactive
     event.is_active = False
-
-    # ✅ set end_time = NOW (IST) so window becomes correct
     now_ist = _now_ist_aware()
     event.end_time = now_ist.time().replace(tzinfo=None)
 
-    # Expire only unfinished submissions
     await db.execute(
         update(EventSubmission)
         .where(
@@ -1734,7 +1266,6 @@ async def end_event(db: AsyncSession, event_id: int):
     await db.commit()
     await db.refresh(event)
 
-    # ✅ clear cached event lists
     await cache_delete_pattern("admin:events:*")
     await cache_delete_pattern("student:events:*")
 
@@ -1761,7 +1292,6 @@ async def delete_event(db: AsyncSession, event_id: int) -> None:
     await db.execute(sql_delete(Event).where(Event.id == event_id))
     await db.commit()
 
-    # ✅ clear cached event lists
     await cache_delete_pattern("admin:events:*")
     await cache_delete_pattern("student:events:*")
 
@@ -1769,13 +1299,12 @@ async def delete_event(db: AsyncSession, event_id: int) -> None:
 async def list_event_submissions(db: AsyncSession, event_id: int):
     q = await db.execute(
         select(EventSubmission)
-        .options(
-            selectinload(EventSubmission.photos),
-        )
+        .options(selectinload(EventSubmission.photos))
         .where(EventSubmission.event_id == event_id)
         .order_by(EventSubmission.id.desc())
     )
     return q.scalars().all()
+
 
 async def approve_submission(db: AsyncSession, submission_id: int):
     q = await db.execute(
@@ -1794,7 +1323,6 @@ async def approve_submission(db: AsyncSession, submission_id: int):
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # approve submission
     submission.status = "approved"
     if hasattr(submission, "approved_at"):
         submission.approved_at = datetime.now(timezone.utc)
@@ -1802,7 +1330,6 @@ async def approve_submission(db: AsyncSession, submission_id: int):
     await db.commit()
     await db.refresh(submission)
 
-    # create/update approved activity sessions
     sessions = await create_or_update_activity_session_from_submission(
         db=db,
         submission=submission,
@@ -1810,28 +1337,20 @@ async def approve_submission(db: AsyncSession, submission_id: int):
         target_status=ActivitySessionStatus.APPROVED,
     )
 
-    # copy event photos into activity session photos
     for session in sessions:
         await copy_event_photos_to_activity_session(db, submission, session)
 
-    # create/update face check rows
     for session in sessions:
         await create_face_check_for_activity_session(db, submission, session)
 
-    # ✅ CREDIT POINTS TO STUDENT TOTAL ONLY ONCE
     await _credit_submission_points_once(db, submission, event)
 
-    # generate certificates
-    
-
-    # reload latest submission
     q = await db.execute(
         select(EventSubmission)
         .options(selectinload(EventSubmission.photos))
         .where(EventSubmission.id == submission_id)
     )
     submission = q.scalar_one()
-
     return submission
 
 
@@ -1854,25 +1373,20 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 
     await db.commit()
 
-    # reload with photos eagerly loaded to avoid MissingGreenlet during response serialization
     q = await db.execute(
         select(EventSubmission)
         .options(selectinload(EventSubmission.photos))
         .where(EventSubmission.id == submission_id)
     )
     submission = q.scalar_one()
-
     return submission
 
 
 # =========================================================
 # ---------------------- STUDENT ---------------------------
 # =========================================================
+
 async def list_active_events(db: AsyncSession) -> list[Event]:
-    """
-    Returns Event ORM objects so routes can safely pass each item into
-    _event_out_dict(ev), which expects ev.id / ev.title / etc.
-    """
     q = await db.execute(
         select(Event)
         .where(Event.event_date.isnot(None))
@@ -1883,6 +1397,7 @@ async def list_active_events(db: AsyncSession) -> list[Event]:
         )
     )
     return q.scalars().all()
+
 
 async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
     q = await db.execute(select(Event).where(Event.id == event_id))
@@ -1921,6 +1436,7 @@ async def add_photo(
     student_id: int,
     seq_no: int,
     image_url: str,
+    captured_at: Any = None,
 ):
     q = await db.execute(
         select(EventSubmission).where(
@@ -1946,6 +1462,8 @@ async def add_photo(
     if seq_no < 1 or seq_no > required_photos:
         raise HTTPException(status_code=400, detail=f"seq_no must be between 1 and {required_photos}")
 
+    actual_captured_at = _parse_datetime(captured_at) or datetime.now(IST)
+
     q = await db.execute(
         select(EventSubmissionPhoto).where(
             EventSubmissionPhoto.submission_id == submission_id,
@@ -1956,9 +1474,8 @@ async def add_photo(
 
     if existing_photo:
         existing_photo.image_url = image_url
-        # ✅ Update captured_at timestamp for this photo
         if hasattr(existing_photo, "captured_at"):
-            existing_photo.captured_at = datetime.now(timezone.utc)
+            existing_photo.captured_at = actual_captured_at
         await db.commit()
         await db.refresh(existing_photo)
         return existing_photo
@@ -1967,10 +1484,8 @@ async def add_photo(
         submission_id=submission_id,
         seq_no=seq_no,
         image_url=image_url,
+        captured_at=actual_captured_at,
     )
-    # ✅ Set captured_at timestamp when photo is first uploaded
-    if hasattr(photo, "captured_at"):
-        photo.captured_at = datetime.now(timezone.utc)
     db.add(photo)
     await db.commit()
     await db.refresh(photo)
@@ -1978,12 +1493,9 @@ async def add_photo(
 
 
 async def _trigger_face_verification_for_submission(submission_id: int) -> dict:
-    """
-    Calls the face verification endpoint internally after submission
-    to run the actual OpenCV face matching pipeline.
-    """
     try:
         import httpx
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"http://localhost:8000/api/face/verify-event-submission/{submission_id}"
@@ -1995,6 +1507,7 @@ async def _trigger_face_verification_for_submission(submission_id: int) -> dict:
     except Exception as e:
         print(f"[face-verify] Error for submission {submission_id}: {e}")
         return {"matched": False, "reason": str(e)}
+
 
 async def final_submit(db: AsyncSession, submission_id: int, student_id: int, description: str):
     q = await db.execute(
@@ -2037,7 +1550,6 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
 
     now_utc = datetime.now(timezone.utc)
 
-    # Step 1: mark as submitted
     submission.status = "submitted"
     submission.description = description
     if hasattr(submission, "submitted_at"):
@@ -2046,8 +1558,6 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
     await db.commit()
     await db.refresh(submission)
 
-    # Step 2: create activity session in submitted state
-    # ✅ This now uses actual photo timestamp hours (not event window)
     sessions = await create_or_update_activity_session_from_submission(
         db=db,
         submission=submission,
@@ -2055,21 +1565,17 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
         target_status=ActivitySessionStatus.SUBMITTED,
     )
 
-    # Step 3: copy photos to activity session
     for session in sessions:
         await copy_event_photos_to_activity_session(db, submission, session)
 
-    # Step 4: create placeholder face rows
     for session in sessions:
         await create_face_check_for_activity_session(db, submission, session)
 
-    # Step 5: run actual face verification
     print(f"[face-verify] Running face verification for submission {submission_id}...")
     face_result = await _trigger_face_verification_for_submission(submission_id)
     any_matched = bool(face_result.get("matched", False))
     print(f"[face-verify] Result: matched={any_matched}, reason={face_result.get('reason')}")
 
-    # Step 6: update ActivityFaceCheck rows with actual result
     processed_object = face_result.get("processed_object")
     for session in sessions:
         photo_res = await db.execute(
@@ -2116,7 +1622,6 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
 
     await db.commit()
 
-    # Step 7: geofence check + face check together
     photo_geo_res = await db.execute(
         select(EventSubmissionPhoto).where(
             EventSubmissionPhoto.submission_id == submission_id
@@ -2140,7 +1645,6 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
         elif getattr(p, "is_in_geofence", None) is None:
             geo_reasons.append(f"photo_{p.seq_no}_gps_missing")
 
-    # Step 8: auto approve only if face matched AND all uploaded photos are inside geofence
     if any_matched and all_in_geofence:
         submission.status = "approved"
         if hasattr(submission, "approved_at"):
@@ -2162,15 +1666,9 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
         for session in sessions:
             await create_face_check_for_activity_session(db, submission, session)
 
-        # ✅ IMPORTANT: credit points to student total only once
-        # ✅ Points are now based on actual photo timestamp difference
         await _credit_submission_points_once(db, submission, event)
 
-        # generate certificates
-        
-
     else:
-        # Keep in admin review queue
         submission.status = "submitted"
 
         reasons = []
