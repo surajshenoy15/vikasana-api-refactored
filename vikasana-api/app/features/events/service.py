@@ -938,6 +938,42 @@ async def _infer_activity_type_ids_from_sessions(
     )
     return [int(r[0]) for r in aq.all() if r and r[0] is not None]
 
+async def _certificate_points_for_event_activity(
+    db: AsyncSession,
+    event_id: int,
+    at,
+    at_id: int,
+    hours: float,
+) -> int:
+    map_q = await db.execute(
+        select(EventActivityType).where(
+            EventActivityType.event_id == event_id,
+            EventActivityType.activity_type_id == at_id,
+        )
+    )
+    mapping = map_q.scalar_one_or_none()
+
+    score_mode = str(getattr(mapping, "score_mode", "AUTO") or "AUTO").upper()
+    min_required_hours = float(getattr(mapping, "min_required_hours", 0) or 0)
+
+    if hours < min_required_hours:
+        return 0
+
+    if score_mode == "MANUAL":
+        return max(0, int(getattr(mapping, "manual_points", 0) or 0))
+
+    ppu = getattr(at, "points_per_unit", None)
+    hpu = getattr(at, "hours_per_unit", None)
+
+    if ppu is not None and hpu:
+        try:
+            return max(0, int(round((hours / float(hpu)) * float(ppu))))
+        except Exception:
+            return 0
+
+    return 0
+
+
 
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     """
@@ -946,12 +982,12 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     Rules:
     - Only EventSubmission.status == "approved"
     - ActivitySession must still be approved
+    - Certificate points follow event scoring mode:
+        AUTO   -> hours formula
+        MANUAL -> manual_points
     - Certificate is created only when admin triggers generation
     """
 
-    # -----------------------
-    # Approved submissions ONLY
-    # -----------------------
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.event_id == event.id,
@@ -962,17 +998,10 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     if not submissions:
         return 0
 
-    # -----------------------
-    # Event window in UTC
-    # -----------------------
     start_utc, end_utc = _event_window_utc(event)
-
     if end_utc <= start_utc:
         end_utc = start_utc + timedelta(hours=6)
 
-    # -----------------------
-    # Activity types (mapped -> else infer)
-    # -----------------------
     mapped_ids = await _get_event_activity_type_ids(db, event.id)
     activity_type_ids = sorted({int(x) for x in mapped_ids if x is not None})
 
@@ -985,9 +1014,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             detail="No activity types found for this event (mapping empty and no approved sessions in event window).",
         )
 
-    # -----------------------
-    # Caches
-    # -----------------------
     now_utc = datetime.now(timezone.utc)
     now_ist = _now_ist_aware()
     academic_year = _academic_year_from_date(now_ist)
@@ -1008,9 +1034,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     ats = at_q.scalars().all()
     at_by_id = {int(a.id): a for a in ats}
 
-    # -----------------------
-    # Helper: hours overlap
-    # -----------------------
     async def _hours_in_window(student_id: int, at_id: int) -> float:
         session_end = func.coalesce(
             ActivitySession.submitted_at,
@@ -1045,9 +1068,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         )
         return float(hrs_q.scalar() or 0.0)
 
-    # -----------------------
-    # Main issue loop
-    # -----------------------
     issued = 0
 
     for sub in submissions:
@@ -1080,15 +1100,13 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             at = at_by_id.get(at_id)
             activity_type_name = (getattr(at, "name", None) or "").strip() or f"Activity Type #{at_id}"
 
-            points_awarded = 0
-            if at:
-                ppu = getattr(at, "points_per_unit", None)
-                hpu = getattr(at, "hours_per_unit", None)
-                if ppu is not None and hpu:
-                    try:
-                        points_awarded = int(round((hours / float(hpu)) * float(ppu)))
-                    except Exception:
-                        points_awarded = 0
+            points_awarded = await _certificate_points_for_event_activity(
+                db=db,
+                event_id=event.id,
+                at=at,
+                at_id=at_id,
+                hours=hours,
+            )
 
             cert_no = await _next_certificate_no(db, academic_year, now_ist)
 
@@ -1126,9 +1144,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
             issued += 1
 
-    # -----------------------
-    # Mapping mismatch retry
-    # -----------------------
     if issued == 0 and mapped_ids:
         inferred_ids = await _infer_activity_type_ids_from_sessions(db, start_utc, end_utc)
         inferred_ids = sorted({int(i) for i in inferred_ids if i is not None and int(i) > 0})
@@ -1169,15 +1184,13 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                     at = at_by_id.get(at_id)
                     activity_type_name = (getattr(at, "name", None) or "").strip() or f"Activity Type #{at_id}"
 
-                    points_awarded = 0
-                    if at:
-                        ppu = getattr(at, "points_per_unit", None)
-                        hpu = getattr(at, "hours_per_unit", None)
-                        if ppu is not None and hpu:
-                            try:
-                                points_awarded = int(round((hours / float(hpu)) * float(ppu)))
-                            except Exception:
-                                points_awarded = 0
+                    points_awarded = await _certificate_points_for_event_activity(
+                        db=db,
+                        event_id=event.id,
+                        at=at,
+                        at_id=at_id,
+                        hours=hours,
+                    )
 
                     cert_no = await _next_certificate_no(db, academic_year, now_ist)
 
@@ -1217,8 +1230,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
     await db.commit()
     return issued
-
-
 # =========================================================
 # ---------------------- CERT LIST (STUDENT) ----------------
 # =========================================================
