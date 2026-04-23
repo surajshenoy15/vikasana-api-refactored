@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_, desc
+from sqlalchemy import select, func, or_, desc, delete
 from sqlalchemy.orm import selectinload
 import csv
 import io
@@ -9,7 +9,7 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_admin, get_current_faculty
 
 from app.features.auth.models import Admin
-from app.features.faculty.models import Faculty
+from app.features.faculty.models import Faculty, FacultyActivationSession
 from app.features.students.models import Student
 
 from app.features.activities.models import ActivitySession, ActivitySessionStatus
@@ -40,6 +40,8 @@ from app.features.faculty.service import (
     set_password_after_otp,
     activate_faculty,
 )
+
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/faculty", tags=["Faculty"])
 
@@ -96,7 +98,7 @@ async def import_faculty_csv(
 
     raw = await file.read()
     try:
-        text = raw.decode("utf-8-sig")  # handles BOM
+        text = raw.decode("utf-8-sig")
     except Exception:
         raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded")
 
@@ -183,8 +185,16 @@ async def delete_faculty(
     faculty = result.scalar_one_or_none()
     if not faculty:
         raise HTTPException(status_code=404, detail="Faculty not found")
+
+    await db.execute(
+        delete(FacultyActivationSession).where(
+            FacultyActivationSession.faculty_id == faculty_id
+        )
+    )
+
     await db.delete(faculty)
     await db.commit()
+
     return {"detail": f"Faculty {faculty_id} deleted"}
 
 
@@ -213,8 +223,7 @@ async def dashboard_stats(
 
 
 # =========================================================
-# ✅ FACULTY APP: LIST ACTIVITY SESSIONS (Activities Tab)
-# GET /api/faculty/activity-sessions
+# FACULTY APP: LIST ACTIVITY SESSIONS
 # =========================================================
 
 @router.get("/activity-sessions", summary="List activity sessions (Faculty auth)")
@@ -228,7 +237,7 @@ async def list_activity_sessions(
 ):
     stmt = (
         select(ActivitySession)
-        .options(selectinload(ActivitySession.student))  # ✅ prevents MissingGreenlet
+        .options(selectinload(ActivitySession.student))
         .where(ActivitySession.student.has(Student.college == current_faculty.college))
         .order_by(desc(ActivitySession.created_at))
         .limit(limit)
@@ -247,23 +256,21 @@ async def list_activity_sessions(
 
     if status:
         s = status.strip().upper()
-        # only filter if matches enum
         if s in ActivitySessionStatus.__members__:
             stmt = stmt.where(ActivitySession.status == ActivitySessionStatus[s])
 
     sessions = (await db.execute(stmt)).scalars().all()
 
-    # ✅ Map to frontend shape
     activities = []
     for sess in sessions:
-        stu = sess.student  # already loaded via selectinload
+        stu = sess.student
         activities.append(
             {
                 "id": sess.id,
                 "title": sess.activity_name,
                 "student_name": stu.name if stu else "—",
                 "usn": stu.usn if stu else "—",
-                "category": None,  # you can fill from activity_type if you want (add selectinload)
+                "category": None,
                 "description": sess.description,
                 "status": (sess.status.value if hasattr(sess.status, "value") else str(sess.status)).lower(),
                 "submitted_at": sess.submitted_at or sess.created_at,
@@ -274,9 +281,7 @@ async def list_activity_sessions(
 
 
 # =========================================================
-# ✅ FACULTY APP: UPDATE STATUS (Approve/Reject)
-# PATCH /api/faculty/activity-sessions/{session_id}/status
-# Body: {"status":"APPROVED"} or {"status":"REJECTED"}
+# FACULTY APP: UPDATE STATUS
 # =========================================================
 
 @router.patch("/activity-sessions/{session_id}/status", summary="Update activity session status (Faculty auth)")
@@ -288,7 +293,6 @@ async def update_activity_session_status(
 ):
     raw = (body.get("status") or "").strip().upper()
 
-    # UI uses approved/rejected, map to enum values
     if raw in ("APPROVED", "REJECTED", "SUBMITTED", "FLAGGED", "DRAFT", "EXPIRED"):
         new_status = ActivitySessionStatus[raw]
     elif raw.lower() in ("approved", "rejected"):
@@ -305,7 +309,6 @@ async def update_activity_session_status(
     if not sess:
         raise HTTPException(status_code=404, detail="Activity session not found")
 
-    # Ensure faculty can update only their college students
     if not sess.student or (sess.student.college or "") != (current_faculty.college or ""):
         raise HTTPException(status_code=403, detail="Not allowed")
 
@@ -317,7 +320,7 @@ async def update_activity_session_status(
 
 
 # =========================================================
-# ✅ ACTIVATION FLOW (unchanged)
+# ACTIVATION FLOW
 # =========================================================
 
 @router.get("/activation/validate", response_model=ActivationValidateResponse, summary="Validate activation token and create activation session")
@@ -362,10 +365,9 @@ async def activate(token: str = Query(...), db: AsyncSession = Depends(get_db)):
     return {"detail": "Account activated successfully."}
 
 
-from pydantic import BaseModel
-
 class VerifyQrRequest(BaseModel):
-    qr: str  # or qr_data / token depending on what you're sending
+    qr: str
+
 
 @router.post("/verify-qr", summary="Verify QR (Faculty auth)")
 async def verify_qr(
@@ -376,10 +378,6 @@ async def verify_qr(
     qr = (body.qr or "").strip()
     if not qr:
         raise HTTPException(status_code=400, detail="qr is required")
-
-    # ✅ TODO: decode/validate QR content
-    # Example: if QR encodes session_id or student_id, parse it and validate.
-    # For now, just return success so your 405 is fixed and you can wire logic next.
 
     return {
         "ok": True,
