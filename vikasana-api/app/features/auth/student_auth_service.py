@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from app.features.students.models import Student
 from app.features.auth.models import StudentOtpSession
+from app.features.college_access.service import ensure_college_is_active
 from app.core.email_service import send_student_otp_email
 
 
@@ -30,6 +31,9 @@ async def request_student_otp(db: AsyncSession, email: str) -> None:
     student = q.scalar_one_or_none()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found with this email")
+
+    # ✅ SaaS college-wide access control
+    await ensure_college_is_active(db, student.college)
 
     otp = _otp()
     print("\n========= STUDENT OTP =========")
@@ -74,12 +78,18 @@ async def verify_student_otp_and_issue_token(db: AsyncSession, email: str, otp: 
         await db.commit()
         raise HTTPException(status_code=400, detail="Invalid OTP")
 
+    student_q = await db.execute(select(Student).where(Student.email == email))
+    student = student_q.scalar_one_or_none()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found with this email")
+
+    # ✅ SaaS college-wide access control
+    await ensure_college_is_active(db, student.college)
+
     sess.used_at = datetime.now(timezone.utc)
     await db.commit()
 
-    # ✅ issue JWT token (hook into your existing JWT util)
-    # Replace below line with your existing token creator
-    from app.core.jwt import create_access_token  # <-- IF you have it
+    from app.core.jwt import create_access_token
     token = create_access_token({"sub": email, "role": "student"})
 
     return token

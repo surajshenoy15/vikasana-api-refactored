@@ -9,6 +9,7 @@ from app.core.jwt import decode_access_token
 from app.features.auth.models import Admin
 from app.features.faculty.models import Faculty
 from app.features.students.models import Student
+from app.features.college_access.service import ensure_college_is_active
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -84,11 +85,9 @@ async def get_current_faculty(
         payload = decode_access_token(credentials.credentials)
         faculty_id = int(payload["sub"])
 
-        # ✅ faculty tokens require this
         if payload.get("type") != "access":
             raise not_authenticated
 
-        # ✅ optional role enforcement
         role = payload.get("role")
         if role and role != "faculty":
             raise HTTPException(
@@ -111,6 +110,9 @@ async def get_current_faculty(
             detail="This faculty account has been deactivated",
         )
 
+    # ✅ SaaS college-wide access control
+    await ensure_college_is_active(db, faculty.college)
+
     return faculty
 
 
@@ -122,10 +124,9 @@ async def get_current_student(
     Student auth guard dependency.
 
     ✅ Supports BOTH token styles:
-    A) Current student OTP token (your current system):
+    A) Current student OTP token:
        payload["sub"] = student_email
        payload["role"] = "student"
-       (no payload["type"])
 
     B) Future improved token style:
        payload["sub"] = student_id (numeric string)
@@ -133,7 +134,7 @@ async def get_current_student(
        payload["role"] = "student"
 
     We enforce role when present.
-    We DO NOT require 'type' for student tokens (to match your current token).
+    We DO NOT require 'type' for student tokens.
     """
 
     not_authenticated = _not_authenticated_exception()
@@ -160,11 +161,9 @@ async def get_current_student(
     except (JWTError, KeyError, ValueError):
         raise not_authenticated
 
-    # ✅ If sub is numeric -> treat as student_id
     if sub.isdigit():
         result = await db.execute(select(Student).where(Student.id == int(sub)))
     else:
-        # ✅ Otherwise treat sub as email (your current token)
         result = await db.execute(select(Student).where(Student.email == sub))
 
     student = result.scalar_one_or_none()
@@ -177,5 +176,8 @@ async def get_current_student(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This student account has been deactivated",
         )
+
+    # ✅ SaaS college-wide access control
+    await ensure_college_is_active(db, student.college)
 
     return student

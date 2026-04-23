@@ -95,16 +95,13 @@ app.add_middleware(
 async def log_origin(request: Request, call_next):
     origin = request.headers.get("origin")
     if origin:
-        print(f"\U0001f30d ORIGIN: {origin} | PATH: {request.url.path}")
+        print(f"🌍 ORIGIN: {origin} | PATH: {request.url.path}")
     response = await call_next(request)
     return response
 
 
 # ═══════════════════════════════════════════════════════════════
 # FEATURE-BASED ROUTE REGISTRATION
-# Each feature module registers its own routes with appropriate prefixes.
-# To extract a module into a microservice, simply move the feature
-# folder and re-register its routes in a standalone FastAPI app.
 # ═══════════════════════════════════════════════════════════════
 
 # ── Auth ──
@@ -112,6 +109,10 @@ from app.features.auth.routes import router as auth_router
 from app.features.auth.student_routes import router as student_auth_router
 app.include_router(auth_router, prefix="/api")
 app.include_router(student_auth_router, prefix="/api")
+
+# ── College Access (SaaS control) ──
+from app.features.college_access.routes import router as college_access_router
+app.include_router(college_access_router, prefix="/api")
 
 # ── Faculty ──
 from app.features.faculty.routes import router as faculty_router

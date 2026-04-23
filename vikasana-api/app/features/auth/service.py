@@ -9,6 +9,7 @@ from app.core.security import create_access_token, verify_password
 
 from app.features.auth.models import Admin
 from app.features.faculty.models import Faculty
+from app.features.college_access.service import ensure_college_is_active
 
 from app.features.auth.schemas.auth import (
     AdminInfo,
@@ -64,12 +65,16 @@ async def faculty_login(payload: LoginRequest, db: AsyncSession) -> FacultyLogin
     Faculty login (email + password)
     - Uses same timing-safe pattern as admin login
     - Requires faculty.is_active = True AND password_hash exists
+    - Blocks login if the whole college is deactivated
     """
     result = await db.execute(select(Faculty).where(Faculty.email == payload.email))
     faculty = result.scalar_one_or_none()
 
     DUMMY_HASH = "$2b$12$dummyhashXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-    password_ok = verify_password(payload.password, faculty.password_hash if (faculty and faculty.password_hash) else DUMMY_HASH)
+    password_ok = verify_password(
+        payload.password,
+        faculty.password_hash if (faculty and faculty.password_hash) else DUMMY_HASH,
+    )
 
     if not faculty or not password_ok:
         raise HTTPException(
@@ -89,7 +94,9 @@ async def faculty_login(payload: LoginRequest, db: AsyncSession) -> FacultyLogin
             detail="Password not set. Please activate your account.",
         )
 
-    # If you want to track faculty last login, add column later.
+    # ✅ SaaS college-wide access control
+    await ensure_college_is_active(db, faculty.college)
+
     token = create_access_token(faculty.id, faculty.email)
 
     return FacultyLoginResponse(
