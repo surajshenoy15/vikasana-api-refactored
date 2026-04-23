@@ -1,4 +1,3 @@
-# app/schemas/events.py  ✅ FULLY UPDATED (models aligned + event geofence + event submission photos gps)
 from __future__ import annotations
 
 from typing import Optional, List, Any
@@ -8,12 +7,38 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.config import ConfigDict
 
 
-# =========================================================
-# ------------------ EVENTS (CREATE / UPDATE / OUT) --------
-# =========================================================
-
 DEFAULT_EVENT_RADIUS_M = 500
 
+
+# =========================================================
+# ------------------ SCORING RULES ------------------------
+# =========================================================
+
+class EventScoringRuleIn(BaseModel):
+    activity_type_id: int
+    score_mode: str = "AUTO"
+    manual_points: Optional[int] = None
+    min_required_hours: Optional[float] = None
+
+    @field_validator("score_mode", mode="before")
+    @classmethod
+    def _normalize_score_mode(cls, v: Any):
+        if v is None:
+            return "AUTO"
+        s = str(v).strip().upper()
+        return s if s in {"AUTO", "MANUAL"} else "AUTO"
+
+
+class EventScoringRuleOut(BaseModel):
+    activity_type_id: int
+    score_mode: str = "AUTO"
+    manual_points: Optional[int] = None
+    min_required_hours: Optional[float] = None
+
+
+# =========================================================
+# ------------------ EVENTS (CREATE / UPDATE / OUT) -------
+# =========================================================
 
 class EventCreateIn(BaseModel):
     """
@@ -33,15 +58,15 @@ class EventCreateIn(BaseModel):
 
     thumbnail_url: Optional[str] = None
 
-    # ✅ Location fields
     venue_name: Optional[str] = None
     maps_url: Optional[str] = None
     location_lat: Optional[float] = None
     location_lng: Optional[float] = None
     geo_radius_m: Optional[int] = None
 
-    # ✅ Event ↔ ActivityType mapping
     activity_type_ids: List[int] = Field(default_factory=list)
+    custom_activities: List[str] = Field(default_factory=list)
+    scoring_rules: List[EventScoringRuleIn] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -62,7 +87,6 @@ class EventCreateIn(BaseModel):
         if v is None:
             return []
 
-        # "6,7"
         if isinstance(v, str):
             parts = [x.strip() for x in v.split(",") if x.strip()]
             out: List[int] = []
@@ -73,11 +97,9 @@ class EventCreateIn(BaseModel):
                     pass
             return out
 
-        # single int
         if isinstance(v, int):
             return [v]
 
-        # list of dicts: [{id: 6}, {id: 7}]
         if isinstance(v, list) and v and isinstance(v[0], dict):
             out: List[int] = []
             for obj in v:
@@ -87,7 +109,6 @@ class EventCreateIn(BaseModel):
                     pass
             return out
 
-        # list of strings/ints
         if isinstance(v, list):
             out: List[int] = []
             for x in v:
@@ -99,11 +120,22 @@ class EventCreateIn(BaseModel):
 
         return []
 
+    @field_validator("custom_activities", mode="before")
+    @classmethod
+    def _coerce_custom_activities(cls, v: Any):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        return []
+
 
 class EventUpdateIn(BaseModel):
     """
-    ✅ Used for PUT/PATCH /admin/events/{id}
-    Partial updates supported (prevents 422).
+    Used for PUT/PATCH /admin/events/{id}
+    Partial updates supported.
     """
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
@@ -119,15 +151,15 @@ class EventUpdateIn(BaseModel):
     is_active: Optional[bool] = None
     thumbnail_url: Optional[str] = None
 
-    # ✅ Location fields
     venue_name: Optional[str] = None
     maps_url: Optional[str] = None
     location_lat: Optional[float] = None
     location_lng: Optional[float] = None
     geo_radius_m: Optional[int] = None
 
-    # ✅ mapping (optional on update)
     activity_type_ids: Optional[List[int]] = None
+    custom_activities: Optional[List[str]] = None
+    scoring_rules: Optional[List[EventScoringRuleIn]] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -145,7 +177,6 @@ class EventUpdateIn(BaseModel):
     @field_validator("activity_type_ids", mode="before")
     @classmethod
     def _coerce_activity_type_ids(cls, v: Any):
-        # On update, None means "do not change mapping"
         if v is None:
             return None
 
@@ -182,6 +213,17 @@ class EventUpdateIn(BaseModel):
 
         return []
 
+    @field_validator("custom_activities", mode="before")
+    @classmethod
+    def _coerce_custom_activities(cls, v: Any):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        return []
+
 
 class EventOut(BaseModel):
     id: int
@@ -196,12 +238,14 @@ class EventOut(BaseModel):
 
     thumbnail_url: Optional[str] = None
 
-    # ✅ Location
     venue_name: Optional[str] = None
     maps_url: Optional[str] = None
     location_lat: Optional[float] = None
     location_lng: Optional[float] = None
     geo_radius_m: Optional[int] = None
+
+    activity_type_ids: List[int] = Field(default_factory=list)
+    scoring_rules: List[EventScoringRuleOut] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -226,13 +270,10 @@ class RegisterOut(BaseModel):
 
 
 # =========================================================
-# ------------------ PHOTOS (EVENT SUBMISSION PHOTOS) ------
+# ------------------ PHOTOS -------------------------------
 # =========================================================
 
 class EventSubmissionPhotoOut(BaseModel):
-    """
-    ✅ Matches app/models/events.py -> EventSubmissionPhoto
-    """
     id: int
     submission_id: int
     seq_no: int
@@ -249,9 +290,6 @@ class EventSubmissionPhotoOut(BaseModel):
 
 
 class PhotosUploadOut(BaseModel):
-    """
-    ✅ Used by POST /student/submissions/{submission_id}/photos
-    """
     submission_id: int
     photos: List[EventSubmissionPhotoOut]
 
@@ -278,6 +316,7 @@ class SubmissionOut(BaseModel):
     points_credited: bool = False
 
     model_config = ConfigDict(from_attributes=True)
+
 
 class AdminSubmissionOut(BaseModel):
     id: int

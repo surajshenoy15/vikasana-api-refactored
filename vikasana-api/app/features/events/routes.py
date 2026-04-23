@@ -17,6 +17,7 @@ from app.core.activity_storage import upload_activity_image
 from app.features.events.models import Event, EventSubmission, EventSubmissionPhoto
 from app.features.events.schemas.events import (
     EventCreateIn,
+    EventUpdateIn,
     EventOut,
     RegisterOut,
     PhotosUploadOut,
@@ -74,10 +75,30 @@ def _as_naive_datetime_for_end_time(event_date: date_type | None, end_val):
         return datetime.combine(event_date, end_val).replace(tzinfo=None)
     raise HTTPException(status_code=422, detail="Invalid end_time type")
 
-
 def _event_out_dict(ev: Event) -> dict:
     end_val = getattr(ev, "end_time", None)
     end_time = end_val.time() if isinstance(end_val, datetime) else end_val
+
+    mapping_rows = list(getattr(ev, "activity_types", []) or [])
+
+    activity_type_ids = sorted(
+        {
+            int(row.activity_type_id)
+            for row in mapping_rows
+            if getattr(row, "activity_type_id", None) is not None
+        }
+    )
+
+    scoring_rules = [
+        {
+            "activity_type_id": int(row.activity_type_id),
+            "score_mode": getattr(row, "score_mode", "AUTO"),
+            "manual_points": getattr(row, "manual_points", None),
+            "min_required_hours": getattr(row, "min_required_hours", None),
+        }
+        for row in mapping_rows
+        if getattr(row, "activity_type_id", None) is not None
+    ]
 
     return {
         "id": ev.id,
@@ -96,8 +117,9 @@ def _event_out_dict(ev: Event) -> dict:
         "geo_radius_m": int(
             getattr(ev, "geo_radius_m", DEFAULT_EVENT_RADIUS_M) or DEFAULT_EVENT_RADIUS_M
         ),
+        "activity_type_ids": activity_type_ids,
+        "scoring_rules": scoring_rules,
     }
-
 
 def _normalize_activity_type_ids(payload: EventCreateIn) -> list[int]:
     raw = getattr(payload, "activity_type_ids", None) or []
@@ -182,11 +204,10 @@ async def admin_event_thumbnail_upload(
         admin_id=admin.id,
     )
 
-
 @router.put("/admin/events/{event_id}", response_model=EventOut)
 async def admin_update_event_api(
     event_id: int,
-    payload: EventCreateIn,
+    payload: EventUpdateIn,
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):

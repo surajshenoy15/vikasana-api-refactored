@@ -1,4 +1,3 @@
-# app/models/events.py
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -33,35 +32,29 @@ class Event(Base):
     start_time = Column(Time, nullable=True)
 
     # IMPORTANT:
-    # This is TIMESTAMP WITHOUT TIME ZONE in Postgres by default.
-    # So we store NAIVE datetime in controllers.
+    # This is TIME in Postgres
     end_time = Column(Time, nullable=True)
 
-    # ✅ Location fields (existing)
     venue_name = Column(String(255), nullable=True)
     maps_url = Column(Text, nullable=True)
 
-    # ✅ NEW: Event geofence target (admin sets this)
     location_lat = Column(Float, nullable=True)
     location_lng = Column(Float, nullable=True)
-
-    # ✅ NEW: Radius in meters (default 500)
     geo_radius_m = Column(Integer, nullable=False, default=500)
 
-    # timezone aware UTC
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     thumbnail_url = Column(String, nullable=True)
 
     submissions = relationship("EventSubmission", back_populates="event")
 
-    # ✅ mapping rows -> event_activity_types table
     activity_types = relationship(
         "EventActivityType",
         primaryjoin="Event.id==EventActivityType.event_id",
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+
 
 class EventSubmission(Base):
     __tablename__ = "event_submissions"
@@ -70,13 +63,12 @@ class EventSubmission(Base):
     event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"))
     student_id = Column(Integer, ForeignKey("students.id", ondelete="CASCADE"))
 
-    status = Column(String(30), default="in_progress")  # in_progress/submitted/approved/rejected/expired
+    status = Column(String(30), default="in_progress")
     description = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     submitted_at = Column(DateTime(timezone=True), nullable=True)
 
-    # ✅ ADD THESE
     approved_at = Column(DateTime(timezone=True), nullable=True)
     rejection_reason = Column(Text, nullable=True)
     awarded_points = Column(Integer, nullable=False, default=0)
@@ -97,11 +89,9 @@ class EventSubmissionPhoto(Base):
     seq_no = Column(Integer, nullable=False)
     image_url = Column(Text, nullable=False)
 
-    # ✅ NEW: store GPS (student upload time)
     lat = Column(Float, nullable=True)
     lng = Column(Float, nullable=True)
 
-    # ✅ NEW: optional computed fields (helps admin/debug)
     distance_m = Column(Float, nullable=True)
     is_in_geofence = Column(Boolean, nullable=True)
 
@@ -110,8 +100,6 @@ class EventSubmissionPhoto(Base):
     submission = relationship("EventSubmission", back_populates="photos")
 
     __table_args__ = (UniqueConstraint("submission_id", "seq_no", name="uq_submission_seq"),)
-from sqlalchemy import Column, Integer, ForeignKey, UniqueConstraint
-from app.core.database import Base
 
 
 class EventActivityType(Base):
@@ -120,6 +108,11 @@ class EventActivityType(Base):
     id = Column(Integer, primary_key=True)
     event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False, index=True)
     activity_type_id = Column(Integer, ForeignKey("activity_types.id", ondelete="RESTRICT"), nullable=False, index=True)
+
+    # NEW
+    score_mode = Column(String(20), nullable=False, default="AUTO")
+    manual_points = Column(Integer, nullable=True)
+    min_required_hours = Column(Float, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("event_id", "activity_type_id", name="uq_event_activity_type"),

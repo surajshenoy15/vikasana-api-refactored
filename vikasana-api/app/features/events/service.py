@@ -575,24 +575,12 @@ async def _calculate_submission_points(
     event: Event,
 ) -> tuple[int, dict[int, dict]]:
     """
-    Returns:
-      total_points,
-      breakdown = {
-        activity_type_id: {
-          "hours": float,
-          "raw_points": int,
-          "already_awarded": int,
-          "remaining_cap": int | None,
-          "points_to_award": int,
-        }
-      }
+    Supports two scoring modes:
+    - AUTO   -> ActivityType.hours_per_unit + points_per_unit
+    - MANUAL -> EventActivityType.manual_points
 
     Enforces lifetime max_points per activity type using StudentActivityStats.points_awarded.
     """
-
-    activity_type_ids = await _get_event_activity_type_ids(db, event.id)
-    if not activity_type_ids:
-        return 0, {}
 
     start_utc, end_utc = _event_window_utc(event)
     if end_utc <= start_utc:
@@ -601,10 +589,17 @@ async def _calculate_submission_points(
     total_points = 0
     breakdown: dict[int, dict] = {}
 
-    at_q = await db.execute(
-        select(ActivityType).where(ActivityType.id.in_(activity_type_ids))
+    map_q = await db.execute(
+        select(EventActivityType, ActivityType)
+        .join(ActivityType, ActivityType.id == EventActivityType.activity_type_id)
+        .where(EventActivityType.event_id == event.id)
     )
-    activity_types = {int(a.id): a for a in at_q.scalars().all()}
+    rows = map_q.all()
+
+    if not rows:
+        return 0, {}
+
+    activity_type_ids = [int(mapping.activity_type_id) for mapping, _ in rows]
 
     stats_q = await db.execute(
         select(StudentActivityStats).where(
@@ -618,8 +613,8 @@ async def _calculate_submission_points(
         if s.activity_type_id is not None
     }
 
-    for at_id in activity_type_ids:
-        at_id = int(at_id)
+    for mapping, at in rows:
+        at_id = int(mapping.activity_type_id)
 
         session_end = func.coalesce(
             ActivitySession.submitted_at,
@@ -654,28 +649,26 @@ async def _calculate_submission_points(
         )
 
         hours = float(hrs_q.scalar() or 0.0)
-        at = activity_types.get(at_id)
-
-        if not at or hours <= 0:
-            breakdown[at_id] = {
-                "hours": hours,
-                "raw_points": 0,
-                "already_awarded": int(getattr(stats_by_type.get(at_id), "points_awarded", 0) or 0),
-                "remaining_cap": int(getattr(at, "max_points", 0)) if at and getattr(at, "max_points", None) is not None else None,
-                "points_to_award": 0,
-            }
-            continue
-
-        ppu = getattr(at, "points_per_unit", None)
-        hpu = getattr(at, "hours_per_unit", None)
         max_points = getattr(at, "max_points", None)
+        score_mode = str(getattr(mapping, "score_mode", "AUTO") or "AUTO").upper()
+        min_required_hours = float(getattr(mapping, "min_required_hours", 0) or 0)
 
         raw_points = 0
-        if ppu is not None and hpu:
-            try:
-                raw_points = int(round((hours / float(hpu)) * float(ppu)))
-            except Exception:
-                raw_points = 0
+
+        if hours <= 0:
+            raw_points = 0
+        elif score_mode == "MANUAL":
+            if hours >= min_required_hours:
+                raw_points = int(getattr(mapping, "manual_points", 0) or 0)
+        else:
+            if hours >= min_required_hours:
+                ppu = getattr(at, "points_per_unit", None)
+                hpu = getattr(at, "hours_per_unit", None)
+                if ppu is not None and hpu:
+                    try:
+                        raw_points = int(round((hours / float(hpu)) * float(ppu)))
+                    except Exception:
+                        raw_points = 0
 
         raw_points = max(0, int(raw_points))
 
@@ -696,6 +689,7 @@ async def _calculate_submission_points(
 
         breakdown[at_id] = {
             "hours": hours,
+            "score_mode": score_mode,
             "raw_points": raw_points,
             "already_awarded": already_awarded,
             "remaining_cap": remaining_cap,
@@ -705,7 +699,6 @@ async def _calculate_submission_points(
         total_points += points_to_award
 
     return total_points, breakdown
-
 
 async def _credit_submission_points_once(
     db: AsyncSession,
@@ -1366,11 +1359,11 @@ async def create_event(db: AsyncSession, payload) -> dict:
     """
     ✅ UPDATED create_event:
     - end_time is OPTIONAL
-    - if end_time missing → defaults to +24 hours from start_time (window logic handles next-day)
-    - No nested transaction
-    - Validates ActivityType IDs exist
-    - Inserts Event + mappings atomically with ONE commit
-    - Clears Redis cache for admin/student event lists
+    - if end_time missing → window logic treats it as next-day / 24h window
+    - validates ActivityType IDs exist
+    - inserts Event + mappings atomically with ONE commit
+    - supports scoring_rules for AUTO / MANUAL
+    - clears Redis cache for admin/student event lists
     """
 
     # ─────────────────────────────────────────────
@@ -1391,11 +1384,12 @@ async def create_event(db: AsyncSession, payload) -> dict:
     # ✅ end_time OPTIONAL
     end_time: time_type | None = _parse_time(getattr(payload, "end_time", None))
 
-    # ✅ if end_time missing → default 24 hours from start_time
+    # ✅ if end_time missing → store same as start_time
+    # runtime window logic will treat it as next-day / 24h-style window
     if end_time is None:
         end_time = start_time
 
-    # If admin provided end_time, validate it
+    # If admin explicitly provided end_time, validate it
     if getattr(payload, "end_time", None) is not None and end_time <= start_time:
         raise HTTPException(status_code=422, detail="end_time must be after start_time")
 
@@ -1423,6 +1417,27 @@ async def create_event(db: AsyncSession, payload) -> dict:
     maps_url = getattr(payload, "maps_url", None) or getattr(payload, "venue_maps_url", None)
 
     # ─────────────────────────────────────────────
+    # scoring_rules map
+    # ─────────────────────────────────────────────
+    scoring_rules = getattr(payload, "scoring_rules", None) or []
+    rule_map = {}
+
+    for r in scoring_rules:
+        at_id = getattr(r, "activity_type_id", None)
+        if at_id is None and isinstance(r, dict):
+            at_id = r.get("activity_type_id")
+        if at_id is None:
+            continue
+        rule_map[int(at_id)] = r
+
+    def _get(rule_obj, key, default=None):
+        if rule_obj is None:
+            return default
+        if isinstance(rule_obj, dict):
+            return rule_obj.get(key, default)
+        return getattr(rule_obj, key, default)
+
+    # ─────────────────────────────────────────────
     # Create event + mappings
     # ─────────────────────────────────────────────
     try:
@@ -1444,9 +1459,20 @@ async def create_event(db: AsyncSession, payload) -> dict:
         db.add(event)
         await db.flush()
 
-        db.add_all(
-            [EventActivityType(event_id=event.id, activity_type_id=at_id) for at_id in ids]
-        )
+        rows = []
+        for at_id in ids:
+            rule = rule_map.get(int(at_id))
+            rows.append(
+                EventActivityType(
+                    event_id=event.id,
+                    activity_type_id=int(at_id),
+                    score_mode=str(_get(rule, "score_mode", "AUTO") or "AUTO").upper(),
+                    manual_points=_get(rule, "manual_points", None),
+                    min_required_hours=_get(rule, "min_required_hours", None),
+                )
+            )
+
+        db.add_all(rows)
 
         await db.commit()
         await db.refresh(event)
@@ -1471,6 +1497,15 @@ async def create_event(db: AsyncSession, payload) -> dict:
             "location_lng": getattr(event, "location_lng", None),
             "geo_radius_m": getattr(event, "geo_radius_m", None),
             "activity_type_ids": ids,
+            "scoring_rules": [
+                {
+                    "activity_type_id": row.activity_type_id,
+                    "score_mode": row.score_mode,
+                    "manual_points": row.manual_points,
+                    "min_required_hours": row.min_required_hours,
+                }
+                for row in rows
+            ],
         }
 
     except HTTPException:
@@ -1481,7 +1516,6 @@ async def create_event(db: AsyncSession, payload) -> dict:
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to create event: {str(e)}")
-
 # =========================================================
 # ---------------------- ADMIN: UPDATE EVENT --------------
 # =========================================================
@@ -1495,10 +1529,11 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
 
     Validations:
       - required_photos in [3..5] if provided
-      - end_time > start_time (same day)
+      - end_time > start_time (same day, only if explicitly provided)
       - activity_type_ids must exist if provided
 
     Also:
+      - supports scoring_rules for AUTO / MANUAL
       - clears Redis cache for admin/student event lists after successful update
     """
     event = await db.get(Event, event_id)
@@ -1578,10 +1613,13 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
         et = event.end_time if isinstance(event.end_time, time_type) else _parse_time(event.end_time)
         if st is None or et is None:
             raise HTTPException(status_code=422, detail="Invalid start_time/end_time")
-        if et <= st:
+
+        if getattr(payload, "end_time", None) is not None and et <= st:
             raise HTTPException(status_code=422, detail="end_time must be after start_time")
 
     new_ids: list[int] = []
+    rows = []
+
     if replace_mappings:
         new_ids = sorted({int(x) for x in (activity_type_ids_raw or []) if x is not None and int(x) > 0})
         if not new_ids:
@@ -1593,9 +1631,41 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
         if missing:
             raise HTTPException(status_code=422, detail=f"Invalid activity_type_ids: {missing}")
 
+        scoring_rules = getattr(payload, "scoring_rules", None) or []
+        rule_map = {}
+
+        for r in scoring_rules:
+            at_id = getattr(r, "activity_type_id", None)
+            if at_id is None and isinstance(r, dict):
+                at_id = r.get("activity_type_id")
+            if at_id is None:
+                continue
+            rule_map[int(at_id)] = r
+
+        def _get(rule_obj, key, default=None):
+            if rule_obj is None:
+                return default
+            if isinstance(rule_obj, dict):
+                return rule_obj.get(key, default)
+            return getattr(rule_obj, key, default)
+
         try:
             await db.execute(sql_delete(EventActivityType).where(EventActivityType.event_id == event_id))
-            db.add_all([EventActivityType(event_id=event_id, activity_type_id=at_id) for at_id in new_ids])
+
+            for at_id in new_ids:
+                rule = rule_map.get(int(at_id))
+                rows.append(
+                    EventActivityType(
+                        event_id=event_id,
+                        activity_type_id=int(at_id),
+                        score_mode=str(_get(rule, "score_mode", "AUTO") or "AUTO").upper(),
+                        manual_points=_get(rule, "manual_points", None),
+                        min_required_hours=_get(rule, "min_required_hours", None),
+                    )
+                )
+
+            db.add_all(rows)
+
         except Exception as e:
             await db.rollback()
             raise HTTPException(status_code=500, detail=f"Failed to update activity mappings: {str(e)}")
@@ -1613,8 +1683,19 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
         raise HTTPException(status_code=500, detail=f"Failed to update event: {str(e)}")
 
     if not replace_mappings:
-        mapped_ids = await _get_event_activity_type_ids(db, event_id)
-        new_ids = sorted({int(x) for x in mapped_ids if x is not None})
+        mapped_q = await db.execute(
+            select(EventActivityType).where(EventActivityType.event_id == event_id)
+        )
+        mapping_rows = mapped_q.scalars().all()
+        new_ids = sorted(
+            {
+                int(x.activity_type_id)
+                for x in mapping_rows
+                if getattr(x, "activity_type_id", None) is not None
+            }
+        )
+    else:
+        mapping_rows = rows
 
     return {
         "id": event.id,
@@ -1632,6 +1713,15 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
         "location_lng": getattr(event, "location_lng", None),
         "geo_radius_m": getattr(event, "geo_radius_m", None),
         "activity_type_ids": new_ids,
+        "scoring_rules": [
+            {
+                "activity_type_id": row.activity_type_id,
+                "score_mode": row.score_mode,
+                "manual_points": row.manual_points,
+                "min_required_hours": row.min_required_hours,
+            }
+            for row in mapping_rows
+        ],
     }
     
 
