@@ -1771,27 +1771,68 @@ async def end_event(db: AsyncSession, event_id: int):
 async def delete_event(db: AsyncSession, event_id: int) -> None:
     result = await db.execute(select(Event).where(Event.id == event_id))
     event = result.scalar_one_or_none()
+
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    await db.execute(sql_delete(EventActivityType).where(EventActivityType.event_id == event_id))
-
-    sub_result = await db.execute(select(EventSubmission.id).where(EventSubmission.event_id == event_id))
-    submission_ids = [row[0] for row in sub_result.fetchall()]
-
-    if submission_ids:
-        await db.execute(
-            sql_delete(EventSubmissionPhoto).where(EventSubmissionPhoto.submission_id.in_(submission_ids))
+    try:
+        # 1. Get all submissions for this event
+        sub_result = await db.execute(
+            select(EventSubmission.id).where(EventSubmission.event_id == event_id)
         )
-        await db.execute(sql_delete(EventSubmission).where(EventSubmission.event_id == event_id))
+        submission_ids = [int(row[0]) for row in sub_result.fetchall() if row[0] is not None]
 
-    await db.execute(sql_delete(Event).where(Event.id == event_id))
-    await db.commit()
+        if submission_ids:
+            # 2. Delete certificates first
+            # certificates.submission_id -> event_submissions.id
+            await db.execute(
+                sql_delete(Certificate).where(
+                    Certificate.submission_id.in_(submission_ids)
+                )
+            )
 
-    # ✅ clear cached event lists
-    await cache_delete_pattern("admin:events:*")
-    await cache_delete_pattern("student:events:*")
+            # 3. Delete event submission photos
+            await db.execute(
+                sql_delete(EventSubmissionPhoto).where(
+                    EventSubmissionPhoto.submission_id.in_(submission_ids)
+                )
+            )
 
+            # 4. Delete event submissions
+            await db.execute(
+                sql_delete(EventSubmission).where(
+                    EventSubmission.event_id == event_id
+                )
+            )
+
+        # 5. Delete event activity type mappings
+        await db.execute(
+            sql_delete(EventActivityType).where(
+                EventActivityType.event_id == event_id
+            )
+        )
+
+        # 6. Delete event
+        await db.execute(
+            sql_delete(Event).where(Event.id == event_id)
+        )
+
+        await db.commit()
+
+        # 7. Clear cache after successful delete
+        await cache_delete_pattern("admin:events:*")
+        await cache_delete_pattern("student:events:*")
+
+    except HTTPException:
+        await db.rollback()
+        raise
+
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete event: {str(e)}"
+        )
 
 async def list_event_submissions(db: AsyncSession, event_id: int):
     q = await db.execute(
