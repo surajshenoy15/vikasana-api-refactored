@@ -1,14 +1,37 @@
 import os
-from minio import Minio
-from minio.error import S3Error
 from datetime import timedelta
+from minio import Minio
 
 
+def _env(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def _env_bool(name: str, default: str = "false") -> bool:
+    return _env(name, default).lower() in ("1", "true", "yes", "y", "on")
+
+
+# Internal Docker client: used for upload/read inside backend containers
 def get_minio() -> Minio:
-    endpoint = os.getenv("MINIO_ENDPOINT", "127.0.0.1:9000")
-    access_key = os.getenv("MINIO_ACCESS_KEY", "")
-    secret_key = os.getenv("MINIO_SECRET_KEY", "")
-    secure = os.getenv("MINIO_SECURE", "false").lower() == "true"
+    endpoint = _env("MINIO_ENDPOINT", "minio:9000")
+    access_key = _env("MINIO_ACCESS_KEY") or _env("MINIO_ROOT_USER")
+    secret_key = _env("MINIO_SECRET_KEY") or _env("MINIO_ROOT_PASSWORD")
+    secure = _env_bool("MINIO_SECURE", "false")
+
+    return Minio(
+        endpoint,
+        access_key=access_key,
+        secret_key=secret_key,
+        secure=secure,
+    )
+
+
+# Public client: used ONLY for generating browser/admin accessible presigned URLs
+def get_public_minio() -> Minio:
+    endpoint = _env("MINIO_PUBLIC_ENDPOINT", "minio.vikasanafoundation.org")
+    access_key = _env("MINIO_ACCESS_KEY") or _env("MINIO_ROOT_USER")
+    secret_key = _env("MINIO_SECRET_KEY") or _env("MINIO_ROOT_PASSWORD")
+    secure = _env_bool("MINIO_PUBLIC_SECURE", "true")
 
     return Minio(
         endpoint,
@@ -24,12 +47,25 @@ def ensure_bucket(minio: Minio, bucket: str) -> None:
         minio.make_bucket(bucket)
 
 
-# ✅ ADD THIS
-def get_presigned_url(bucket: str, object_name: str, expiry_seconds: int = 3600) -> str:
-    minio = get_minio()
+def get_presigned_url(
+    bucket: str,
+    object_name: str,
+    expiry_seconds: int = 600,
+    public: bool = True,
+) -> str:
+    if not object_name:
+        raise ValueError("object_name is required")
 
-    return minio.presigned_get_object(
+    if expiry_seconds < 60:
+        expiry_seconds = 60
+
+    if expiry_seconds > 3600:
+        expiry_seconds = 3600
+
+    client = get_public_minio() if public else get_minio()
+
+    return client.presigned_get_object(
         bucket_name=bucket,
         object_name=object_name,
-        expires=timedelta(seconds=expiry_seconds),
+        expires=timedelta(seconds=int(expiry_seconds)),
     )

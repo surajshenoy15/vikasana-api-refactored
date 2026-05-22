@@ -47,7 +47,7 @@ from app.features.events.service import (
     _ensure_event_window,
     upload_event_thumbnail_file,
 )
-
+from app.core.minio_client import get_presigned_url
 router = APIRouter(tags=["Events"])
 
 DEFAULT_EVENT_RADIUS_M = 500
@@ -267,7 +267,46 @@ async def admin_regenerate_event_certificates(
 ):
     return await regenerate_event_certificates(db, event_id)
 
+PRIVATE_MEDIA_BUCKETS = {
+    "face-verification",
+    "activity-uploads",
+    "vikasana-certificates",
+}
 
+
+@router.get("/admin/media/presign")
+async def admin_presign_private_media(
+    bucket: str = Query(...),
+    object_key: str = Query(...),
+    expires: int = Query(600, ge=60, le=3600),
+    admin=Depends(get_current_admin),
+):
+    if bucket not in PRIVATE_MEDIA_BUCKETS:
+        raise HTTPException(status_code=400, detail="Bucket is not allowed")
+
+    object_key = (object_key or "").strip().lstrip("/")
+
+    if not object_key or ".." in object_key or object_key.startswith("/"):
+        raise HTTPException(status_code=400, detail="Invalid object key")
+
+    try:
+        url = get_presigned_url(
+            bucket=bucket,
+            object_name=object_key,
+            expiry_seconds=expires,
+            public=True,
+        )
+
+        return {
+            "url": url,
+            "expires_in_seconds": expires,
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate private media URL: {str(e)}",
+        )
 # =========================================================
 # ---------------------- STUDENT ---------------------------
 # =========================================================
