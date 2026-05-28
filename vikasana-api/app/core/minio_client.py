@@ -13,36 +13,45 @@ def _env_bool(name: str, default: str = "false") -> bool:
 
 def _storage_provider() -> str:
     """
-    Supported:
-    - minio: current Hostinger/local setup
-    - aws: AWS S3 setup
+    Supported values:
+    - minio: Hostinger/local MinIO
+    - aws: AWS S3
     """
     return _env("S3_PROVIDER", "minio").lower()
 
 
 def _aws_s3_endpoint() -> str:
-    """
-    MinIO SDK can connect to AWS S3 using the regional S3 endpoint.
-    Example: s3.ap-south-1.amazonaws.com
-    """
     region = _env("AWS_REGION", "ap-south-1")
     return _env("AWS_S3_ENDPOINT", f"s3.{region}.amazonaws.com")
 
 
 def _get_access_key() -> str:
     if _storage_provider() == "aws":
-        return _env("AWS_ACCESS_KEY_ID") or _env("MINIO_ACCESS_KEY") or _env("MINIO_ROOT_USER")
+        return (
+            _env("AWS_ACCESS_KEY_ID")
+            or _env("MINIO_ACCESS_KEY")
+            or _env("MINIO_ROOT_USER")
+        )
+
     return _env("MINIO_ACCESS_KEY") or _env("MINIO_ROOT_USER")
 
 
 def _get_secret_key() -> str:
     if _storage_provider() == "aws":
-        return _env("AWS_SECRET_ACCESS_KEY") or _env("MINIO_SECRET_KEY") or _env("MINIO_ROOT_PASSWORD")
+        return (
+            _env("AWS_SECRET_ACCESS_KEY")
+            or _env("MINIO_SECRET_KEY")
+            or _env("MINIO_ROOT_PASSWORD")
+        )
+
     return _env("MINIO_SECRET_KEY") or _env("MINIO_ROOT_PASSWORD")
 
 
-# Internal client: used for upload/read inside backend containers
 def get_minio() -> Minio:
+    """
+    Internal storage client.
+    Used for backend upload/read operations.
+    """
     provider = _storage_provider()
 
     if provider == "aws":
@@ -69,8 +78,11 @@ def get_minio() -> Minio:
     )
 
 
-# Public client: used ONLY for generating browser/admin accessible presigned URLs
 def get_public_minio() -> Minio:
+    """
+    Public storage client.
+    Used for generating browser/admin accessible presigned URLs.
+    """
     provider = _storage_provider()
 
     if provider == "aws":
@@ -118,16 +130,12 @@ def get_presigned_url(
     if not object_name:
         raise ValueError("object_name is required")
 
-    if expiry_seconds < 60:
-        expiry_seconds = 60
-
-    if expiry_seconds > 3600:
-        expiry_seconds = 3600
+    expiry_seconds = max(60, min(int(expiry_seconds), 3600))
 
     client = get_public_minio() if public else get_minio()
 
     return client.presigned_get_object(
         bucket_name=bucket,
         object_name=object_name,
-        expires=timedelta(seconds=int(expiry_seconds)),
+        expires=timedelta(seconds=expiry_seconds),
     )
