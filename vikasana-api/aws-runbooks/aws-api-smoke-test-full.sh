@@ -30,12 +30,12 @@ echo ""
 
 check_endpoint () {
   METHOD=$1
-  PATH=$2
+  API_PATH=$2
   EXPECTED=$3
 
-  URL="$BASE_URL$PATH"
+  URL="$BASE_URL$API_PATH"
 
-  echo "Testing $METHOD $PATH"
+  echo "Testing $METHOD $API_PATH"
 
   CODE=$(curl -s -o /tmp/aws-smoke-response.txt -w "%{http_code}" -X "$METHOD" "$URL")
 
