@@ -140,32 +140,95 @@ def upload_certificate_pdf_bytes(cert_id: int, pdf_bytes: bytes) -> str:
 def presign_certificate_download_url(object_key: str, expires_in: int = 3600) -> str:
     """
     Returns browser-safe presigned certificate URL.
-
-    Important:
-    Do NOT generate using internal minio:9000 and replace string.
-    Sign directly using public endpoint:
-      https://minio.vikasanafoundation.org/...
+    AWS test/prod: use boto3 S3 presigned URL.
+    MinIO local/live VPS: keep old MinIO presigned URL.
     """
+    import os
+    import boto3
+    from botocore.config import Config
 
-    if expires_in < 60:
-        expires_in = 60
+    if not object_key:
+        raise RuntimeError("Certificate object key is missing")
 
-    if expires_in > 7 * 24 * 3600:
-        expires_in = 7 * 24 * 3600
+    object_key = str(object_key).strip().replace("\\", "/").split("?")[0]
+    object_key = object_key.lstrip("/")
 
-    clean_key = normalize_certificate_object_key(object_key)
+    # If DB stores full URL, convert it to path only
+    if object_key.startswith("http://") or object_key.startswith("https://"):
+        from urllib.parse import urlparse, unquote
+        parsed = urlparse(object_key)
+        object_key = unquote(parsed.path).lstrip("/")
 
-    if not clean_key:
-        raise RuntimeError("Certificate object key is empty")
+    # Remove bucket name if stored inside path
+    bucket_prefix = f"{MINIO_BUCKET_CERTIFICATES}/"
+    if object_key.startswith(bucket_prefix):
+        object_key = object_key[len(bucket_prefix):]
 
-    try:
-        public_minio = get_public_minio()
+    # Remove old MinIO proxy prefixes if present
+    legacy_prefixes = [
+        "minio/",
+        "vikasana-certificates/",
+        "vikasana-certificates-652197206453-ap-south-1-an/",
+    ]
 
-        return public_minio.presigned_get_object(
-            bucket_name=MINIO_BUCKET_CERTIFICATES,
-            object_name=clean_key,
-            expires=timedelta(seconds=int(expires_in)),
+    for prefix in legacy_prefixes:
+        if object_key.startswith(prefix):
+            object_key = object_key[len(prefix):]
+            break
+
+    s3_provider = (
+        os.getenv("S3_PROVIDER")
+        or getattr(settings, "S3_PROVIDER", "")
+        if "settings" in globals()
+        else os.getenv("S3_PROVIDER")
+    )
+
+    if str(s3_provider).lower() == "aws":
+        aws_region = os.getenv("AWS_REGION") or "ap-south-1"
+
+        access_key = (
+            os.getenv("AWS_ACCESS_KEY_ID")
+            or os.getenv("MINIO_ACCESS_KEY")
+            or os.getenv("MINIO_ROOT_USER")
         )
 
-    except S3Error as e:
+        secret_key = (
+            os.getenv("AWS_SECRET_ACCESS_KEY")
+            or os.getenv("MINIO_SECRET_KEY")
+            or os.getenv("MINIO_ROOT_PASSWORD")
+        )
+
+        if not access_key or not secret_key:
+            raise RuntimeError("Missing AWS credentials for certificate signed URL")
+
+        s3 = boto3.client(
+            "s3",
+            region_name=aws_region,
+            endpoint_url=f"https://s3.{aws_region}.amazonaws.com",
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "virtual"},
+            ),
+        )
+
+        return s3.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": MINIO_BUCKET_CERTIFICATES,
+                "Key": object_key,
+                "ResponseContentDisposition": f'attachment; filename="{object_key.split("/")[-1]}"',
+            },
+            ExpiresIn=expires_in,
+        )
+
+    # Existing MinIO/live VPS behavior
+    try:
+        return public_minio.presigned_get_object(
+            bucket_name=MINIO_BUCKET_CERTIFICATES,
+            object_name=object_key,
+            expires=timedelta(seconds=expires_in),
+        )
+    except Exception as e:
         raise RuntimeError(f"MinIO certificate presign failed: {e}") from e

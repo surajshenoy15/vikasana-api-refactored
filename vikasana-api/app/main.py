@@ -168,6 +168,10 @@ app.include_router(face_router, prefix="/api")
 from app.features.dashboard.routes import router as admin_dashboard_router
 app.include_router(admin_dashboard_router, prefix="/api")
 
+# ── Admin Private Files ──
+from app.features.admin.file_routes import router as admin_file_router
+app.include_router(admin_file_router, prefix="/api")
+
 # ── Storage (MinIO Proxy) ──
 from app.features.storage.routes import router as public_minio_router
 app.include_router(public_minio_router, prefix="/api")
