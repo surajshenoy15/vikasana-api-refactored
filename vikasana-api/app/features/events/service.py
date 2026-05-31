@@ -34,6 +34,8 @@ from app.core.minio_client import get_minio, ensure_bucket, get_presigned_url
 
 from app.features.events.models import Event, EventSubmission, EventSubmissionPhoto
 from app.features.students.models import Student
+import boto3
+from botocore.config import Config
 from app.features.activities.models import StudentActivityStats
 
 # ✅ Activity tracking
@@ -1317,9 +1319,51 @@ def _storage_provider() -> str:
 
 def _event_thumbnail_bucket() -> str:
     if _storage_provider() == "aws":
-        return os.getenv("AWS_S3_BUCKET_EVENT_THUMBNAILS", "vikasana-event-thumbnails").strip()
+        return (
+            os.getenv("EVENT_THUMBNAIL_BUCKET")
+            or os.getenv("AWS_S3_BUCKET_EVENT_THUMBNAILS")
+            or os.getenv("MINIO_BUCKET_EVENT_THUMBNAILS")
+            or "vikasana-event-thumbnails-652197206453-ap-south-1-an"
+        ).strip()
 
-    return os.getenv("MINIO_BUCKET_EVENT_THUMBNAILS", "vikasana-event-thumbnails").strip()
+    return (
+        os.getenv("EVENT_THUMBNAIL_BUCKET")
+        or os.getenv("MINIO_BUCKET_EVENT_THUMBNAILS")
+        or "vikasana-event-thumbnails"
+    ).strip()
+
+
+def _aws_s3_client():
+    region = os.getenv("AWS_REGION", "ap-south-1").strip()
+
+    access_key = (
+        os.getenv("AWS_ACCESS_KEY_ID")
+        or os.getenv("MINIO_ACCESS_KEY")
+        or os.getenv("MINIO_ROOT_USER")
+    )
+
+    secret_key = (
+        os.getenv("AWS_SECRET_ACCESS_KEY")
+        or os.getenv("MINIO_SECRET_KEY")
+        or os.getenv("MINIO_ROOT_PASSWORD")
+    )
+
+    if not access_key or not secret_key:
+        raise HTTPException(status_code=500, detail="AWS S3 credentials missing")
+
+    return boto3.client(
+        "s3",
+        region_name=region,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=Config(signature_version="s3v4"),
+    )
+
+
+def _aws_s3_public_style_url(bucket: str, object_name: str) -> str:
+    region = os.getenv("AWS_REGION", "ap-south-1").strip()
+    return f"https://{bucket}.s3.{region}.amazonaws.com/{object_name}"
+
 
 async def upload_event_thumbnail_file(
     file: UploadFile,
@@ -1344,10 +1388,7 @@ async def upload_event_thumbnail_file(
     if len(data) > MAX_IMAGE_SIZE:
         raise HTTPException(status_code=400, detail="File too large. Max size is 5 MB")
 
-    minio = get_minio()
-
     bucket = _event_thumbnail_bucket()
-    ensure_bucket(minio, bucket)
 
     ext_map = {
         "image/jpeg": "jpg",
@@ -1358,15 +1399,34 @@ async def upload_event_thumbnail_file(
     ext = ext_map.get(content_type, "jpg")
     object_name = f"thumbnails/{admin_id}/{uuid.uuid4().hex}.{ext}"
 
-    minio.put_object(
-        bucket_name=bucket,
-        object_name=object_name,
-        data=io.BytesIO(data),
-        length=len(data),
-        content_type=content_type,
-    )
+    provider = _storage_provider()
 
-    if _storage_provider() == "minio":
+    if provider == "aws":
+        s3 = _aws_s3_client()
+
+        # Do NOT create bucket here. Bucket already exists in AWS.
+        s3.put_object(
+            Bucket=bucket,
+            Key=object_name,
+            Body=data,
+            ContentType=content_type,
+        )
+
+        public_url = _aws_s3_public_style_url(bucket, object_name)
+
+    else:
+        minio = get_minio()
+
+        ensure_bucket(minio, bucket)
+
+        minio.put_object(
+            bucket_name=bucket,
+            object_name=object_name,
+            data=io.BytesIO(data),
+            length=len(data),
+            content_type=content_type,
+        )
+
         public_base = os.getenv("MINIO_PUBLIC_BASE", "").rstrip("/")
         if public_base:
             public_url = f"{public_base}/{bucket}/{object_name}"
@@ -1377,13 +1437,6 @@ async def upload_event_thumbnail_file(
                 expiry_seconds=3600,
                 public=True,
             )
-    else:
-        public_url = get_presigned_url(
-            bucket=bucket,
-            object_name=object_name,
-            expiry_seconds=3600,
-            public=True,
-        )
 
     return {
         "object_name": object_name,
@@ -1391,7 +1444,7 @@ async def upload_event_thumbnail_file(
         "content_type": content_type,
         "size": len(data),
         "bucket": bucket,
-        "storage_provider": _storage_provider(),
+        "storage_provider": provider,
     }
 # =========================================================
 # ---------------------- ADMIN -----------------------------
