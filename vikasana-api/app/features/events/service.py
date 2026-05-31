@@ -30,7 +30,7 @@ import io
 import os
 import uuid
 from fastapi import UploadFile
-from app.core.minio_client import get_minio, ensure_bucket
+from app.core.minio_client import get_minio, ensure_bucket, get_presigned_url
 
 from app.features.events.models import Event, EventSubmission, EventSubmissionPhoto
 from app.features.students.models import Student
@@ -1311,7 +1311,15 @@ async def regenerate_event_certificates(db: AsyncSession, event_id: int):
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
+def _storage_provider() -> str:
+    return os.getenv("S3_PROVIDER", "minio").strip().lower()
 
+
+def _event_thumbnail_bucket() -> str:
+    if _storage_provider() == "aws":
+        return os.getenv("AWS_S3_BUCKET_EVENT_THUMBNAILS", "vikasana-event-thumbnails").strip()
+
+    return os.getenv("MINIO_BUCKET_EVENT_THUMBNAILS", "vikasana-event-thumbnails").strip()
 
 async def upload_event_thumbnail_file(
     file: UploadFile,
@@ -1321,6 +1329,7 @@ async def upload_event_thumbnail_file(
         raise HTTPException(status_code=400, detail="Missing filename")
 
     content_type = (file.content_type or "").lower().strip()
+
     if content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(
             status_code=400,
@@ -1328,6 +1337,7 @@ async def upload_event_thumbnail_file(
         )
 
     data = await file.read()
+
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
@@ -1336,10 +1346,16 @@ async def upload_event_thumbnail_file(
 
     minio = get_minio()
 
-    bucket = os.getenv("MINIO_BUCKET_EVENT_THUMBNAILS", "vikasana-event-thumbnails")
+    bucket = _event_thumbnail_bucket()
     ensure_bucket(minio, bucket)
 
-    ext = file.filename.split(".")[-1].lower() if "." in file.filename else "jpg"
+    ext_map = {
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+    }
+
+    ext = ext_map.get(content_type, "jpg")
     object_name = f"thumbnails/{admin_id}/{uuid.uuid4().hex}.{ext}"
 
     minio.put_object(
@@ -1350,19 +1366,33 @@ async def upload_event_thumbnail_file(
         content_type=content_type,
     )
 
-    public_base = os.getenv("MINIO_PUBLIC_BASE", "").rstrip("/")
-    if not public_base:
-        public_base = "http://31.97.230.171:9000"
-
-    public_url = f"{public_base}/{bucket}/{object_name}"
+    if _storage_provider() == "minio":
+        public_base = os.getenv("MINIO_PUBLIC_BASE", "").rstrip("/")
+        if public_base:
+            public_url = f"{public_base}/{bucket}/{object_name}"
+        else:
+            public_url = get_presigned_url(
+                bucket=bucket,
+                object_name=object_name,
+                expiry_seconds=3600,
+                public=True,
+            )
+    else:
+        public_url = get_presigned_url(
+            bucket=bucket,
+            object_name=object_name,
+            expiry_seconds=3600,
+            public=True,
+        )
 
     return {
         "object_name": object_name,
         "public_url": public_url,
         "content_type": content_type,
         "size": len(data),
+        "bucket": bucket,
+        "storage_provider": _storage_provider(),
     }
-
 # =========================================================
 # ---------------------- ADMIN -----------------------------
 # =========================================================

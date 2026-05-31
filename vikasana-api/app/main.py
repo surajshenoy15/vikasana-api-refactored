@@ -17,7 +17,7 @@ from app.core.config import settings
 from app.core.redis import close_redis
 
 
-# ── Lifespan (startup/shutdown) ──
+# ── Lifespan startup/shutdown ──
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -77,6 +77,7 @@ default_origins = [
 ]
 
 origins = set(default_origins)
+
 if settings.origins_list:
     origins.update([o.strip() for o in settings.origins_list if o and o.strip()])
 
@@ -107,16 +108,22 @@ async def log_origin(request: Request, call_next):
 # ── Auth ──
 from app.features.auth.routes import router as auth_router
 from app.features.auth.student_routes import router as student_auth_router
+
 app.include_router(auth_router, prefix="/api")
 app.include_router(student_auth_router, prefix="/api")
 
-# ── College Access (SaaS control) ──
+
+# ── College Access SaaS control ──
 from app.features.college_access.routes import router as college_access_router
+
 app.include_router(college_access_router, prefix="/api")
+
 
 # ── Faculty ──
 from app.features.faculty.routes import router as faculty_router
+
 app.include_router(faculty_router, prefix="/api")
+
 
 # ── Students ──
 from app.features.students.routes import (
@@ -125,10 +132,12 @@ from app.features.students.routes import (
     student_router as student_profile_router,
     activity_points_admin_router,
 )
+
 app.include_router(faculty_students_router, prefix="/api")
 app.include_router(admin_students_router, prefix="/api")
 app.include_router(activity_points_admin_router, prefix="/api")
 app.include_router(student_profile_router, prefix="/api")
+
 
 # ── Activities ──
 from app.features.activities.routes import (
@@ -138,42 +147,66 @@ from app.features.activities.routes import (
 )
 from app.features.activities.summary_routes import router as activity_summary_router
 from app.features.activities.types_routes import router as activity_types_router
+
 app.include_router(student_activity_router, prefix="/api")
 app.include_router(admin_activity_router, prefix="/api")
 app.include_router(activity_summary_router, prefix="/api")
 app.include_router(activity_types_router, prefix="/api")
 
-# ── Events (must come before legacy routes) ──
+
+# ── Events must come before legacy routes ──
 from app.features.events.routes import router as events_router
+
 app.include_router(events_router, prefix="/api")
 app.include_router(student_legacy_router, prefix="/api")
 
-# ── Sessions (Admin) ──
+
+# ── Sessions Admin ──
 from app.features.sessions.routes import router as admin_sessions_router
+
 app.include_router(admin_sessions_router, prefix="/api")
+
 
 # ── Certificates ──
 from app.features.certificates.public_routes import router as public_verify_router
 from app.features.certificates.student_routes import router as student_certificates_router
 from app.features.certificates.admin_routes import router as admin_certificates_router
+
 app.include_router(public_verify_router, prefix="/api")
 app.include_router(student_certificates_router, prefix="/api")
 app.include_router(admin_certificates_router, prefix="/api")
 
+
 # ── Face Recognition ──
 from app.features.face.routes import router as face_router
+
 app.include_router(face_router, prefix="/api")
+
 
 # ── Dashboard ──
 from app.features.dashboard.routes import router as admin_dashboard_router
+
 app.include_router(admin_dashboard_router, prefix="/api")
 
-# ── Admin Private Files ──
+
+# ── Private File Signed URLs ──
+# Admin signed URL endpoint:
+# /api/admin/files/signed-url
 from app.features.admin.file_routes import router as admin_file_router
+
 app.include_router(admin_file_router, prefix="/api")
 
-# ── Storage (MinIO Proxy) ──
+
+# Student signed URL endpoint:
+# /api/student/files/signed-url
+from app.features.students.file_routes import router as student_file_router
+
+app.include_router(student_file_router, prefix="/api")
+
+
+# ── Storage MinIO Proxy ──
 from app.features.storage.routes import router as public_minio_router
+
 app.include_router(public_minio_router, prefix="/api")
 
 
