@@ -20,7 +20,28 @@ BUCKET_MAP = {
         "vikasana-certificates-652197206453-ap-south-1-an",
     ),
 }
+def rewrite_minio_url_for_mobile(url: str) -> str:
+    if not url:
+        return url
 
+    public_base = (
+        os.getenv("MINIO_PUBLIC_BASE")
+        or os.getenv("MINIO_PUBLIC_URL")
+        or "https://api.vikasanafoundation.org/minio"
+    ).rstrip("/")
+
+    internal_bases = [
+        "http://minio:9000",
+        "https://minio:9000",
+        "http://localhost:9000",
+        "http://127.0.0.1:9000",
+    ]
+
+    for internal_base in internal_bases:
+        if url.startswith(internal_base):
+            return url.replace(internal_base, public_base, 1)
+
+    return url
 
 def get_minio_client() -> Minio:
     endpoint = os.getenv("MINIO_ENDPOINT", "s3.ap-south-1.amazonaws.com")
@@ -79,7 +100,7 @@ def get_student_signed_url(
             expires=timedelta(minutes=15),
         )
 
-        return {"url": signed_url}
+        return {"url": rewrite_minio_url_for_mobile(signed_url)}
 
     except Exception as e:
         raise HTTPException(
