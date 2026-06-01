@@ -86,11 +86,14 @@ def get_aws_s3_client():
     return boto3.client(
         "s3",
         region_name=region,
+        endpoint_url=f"https://s3.{region}.amazonaws.com",
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
-        config=Config(signature_version="s3v4"),
+        config=Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "virtual"},
+        ),
     )
-
 
 def clean_object_key(key: str) -> str:
     clean_key = (key or "").strip().lstrip("/")
