@@ -1,6 +1,8 @@
 from datetime import timedelta
 import os
 
+import boto3
+from botocore.config import Config
 from fastapi import APIRouter, Depends, HTTPException, Query
 from minio import Minio
 
@@ -13,13 +15,19 @@ router = APIRouter(prefix="/student/files", tags=["Student Files"])
 BUCKET_MAP = {
     "event_thumbnails": os.getenv(
         "EVENT_THUMBNAIL_BUCKET",
-        "vikasana-event-thumbnails-652197206453-ap-south-1-an",
+        "vikasana-event-thumbnails",
     ),
     "certificates": os.getenv(
         "CERTIFICATE_BUCKET",
-        "vikasana-certificates-652197206453-ap-south-1-an",
+        "vikasana-certificates",
     ),
 }
+
+
+def get_s3_provider() -> str:
+    return (os.getenv("S3_PROVIDER") or "minio").strip().lower()
+
+
 def rewrite_minio_url_for_mobile(url: str) -> str:
     if not url:
         return url
@@ -43,10 +51,11 @@ def rewrite_minio_url_for_mobile(url: str) -> str:
 
     return url
 
+
 def get_minio_client() -> Minio:
     endpoint = os.getenv("MINIO_ENDPOINT", "s3.ap-south-1.amazonaws.com")
-    access_key = os.getenv("MINIO_ACCESS_KEY")
-    secret_key = os.getenv("MINIO_SECRET_KEY")
+    access_key = os.getenv("MINIO_ACCESS_KEY") or os.getenv("AWS_ACCESS_KEY_ID")
+    secret_key = os.getenv("MINIO_SECRET_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY")
     secure = os.getenv("MINIO_SECURE", "true").lower() == "true"
 
     if not access_key or not secret_key:
@@ -63,6 +72,70 @@ def get_minio_client() -> Minio:
     )
 
 
+def get_aws_s3_client():
+    region = os.getenv("AWS_REGION", "ap-south-1")
+    access_key = os.getenv("AWS_ACCESS_KEY_ID") or os.getenv("MINIO_ACCESS_KEY")
+    secret_key = os.getenv("AWS_SECRET_ACCESS_KEY") or os.getenv("MINIO_SECRET_KEY")
+
+    if not access_key or not secret_key:
+        raise HTTPException(
+            status_code=500,
+            detail="AWS storage credentials missing",
+        )
+
+    return boto3.client(
+        "s3",
+        region_name=region,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=Config(signature_version="s3v4"),
+    )
+
+
+def clean_object_key(key: str) -> str:
+    clean_key = (key or "").strip().lstrip("/")
+
+    if not clean_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing key",
+        )
+
+    if ".." in clean_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid key",
+        )
+
+    # Remove old URL query params
+    clean_key = clean_key.split("?")[0]
+
+    # If full URL accidentally comes here, extract path
+    if "://" in clean_key:
+        try:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(clean_key)
+            clean_key = parsed.path.lstrip("/")
+        except Exception:
+            pass
+
+    legacy_prefixes = [
+        "minio/",
+        "vikasana-event-thumbnails/",
+        "vikasana-event-thumbnails-652197206453-ap-south-1-an/",
+        "vikasana-certificates/",
+        "vikasana-certificates-652197206453-ap-south-1-an/",
+    ]
+
+    for prefix in legacy_prefixes:
+        if clean_key.startswith(prefix):
+            clean_key = clean_key[len(prefix):]
+            break
+
+    return clean_key
+
+
 @router.get("/signed-url")
 def get_student_signed_url(
     bucket_type: str = Query(...),
@@ -77,21 +150,29 @@ def get_student_signed_url(
             detail="Invalid bucket_type",
         )
 
-    clean_key = key.strip().lstrip("/")
-
-    if not clean_key:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing key",
-        )
-
-    if ".." in clean_key:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid key",
-        )
+    clean_key = clean_object_key(key)
 
     try:
+        provider = get_s3_provider()
+
+        print("SIGNED URL PROVIDER:", provider)
+        print("SIGNED URL BUCKET:", bucket)
+        print("SIGNED URL KEY:", clean_key)
+
+        if provider == "aws":
+            s3 = get_aws_s3_client()
+
+            signed_url = s3.generate_presigned_url(
+                ClientMethod="get_object",
+                Params={
+                    "Bucket": bucket,
+                    "Key": clean_key,
+                },
+                ExpiresIn=900,
+            )
+
+            return {"url": signed_url}
+
         client = get_minio_client()
 
         signed_url = client.presigned_get_object(
