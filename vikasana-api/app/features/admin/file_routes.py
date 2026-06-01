@@ -1,26 +1,53 @@
 from urllib.parse import urlparse, unquote
 import os
+
 import boto3
 from botocore.exceptions import ClientError
+from botocore.config import Config
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.config import settings
 from app.core.dependencies import get_current_admin
-from botocore.config import Config
+
 
 router = APIRouter(prefix="/admin/files", tags=["Admin Files"])
 
 
 BUCKET_MAP = {
-    "activity_uploads": settings.MINIO_BUCKET_ACTIVITIES,
-    "event_thumbnails": settings.MINIO_BUCKET_EVENT_THUMBNAILS,
-    "face_verification": settings.MINIO_FACE_BUCKET,
-    "certificates": settings.MINIO_BUCKET_CERTIFICATES,
-    "faculty": settings.MINIO_BUCKET_FACULTY,
+    "activity_uploads": (
+        os.getenv("MINIO_BUCKET_ACTIVITIES")
+        or getattr(settings, "MINIO_BUCKET_ACTIVITIES", None)
+        or "activity-uploads"
+    ),
+    "event_thumbnails": (
+        os.getenv("EVENT_THUMBNAIL_BUCKET")
+        or os.getenv("MINIO_BUCKET_EVENT_THUMBNAILS")
+        or getattr(settings, "EVENT_THUMBNAIL_BUCKET", None)
+        or getattr(settings, "MINIO_BUCKET_EVENT_THUMBNAILS", None)
+        or "vikasana-event-thumbnails"
+    ),
+    "face_verification": (
+        os.getenv("MINIO_FACE_BUCKET")
+        or getattr(settings, "MINIO_FACE_BUCKET", None)
+        or "face-verification"
+    ),
+    "certificates": (
+        os.getenv("CERTIFICATE_BUCKET")
+        or os.getenv("MINIO_BUCKET_CERTIFICATES")
+        or getattr(settings, "CERTIFICATE_BUCKET", None)
+        or getattr(settings, "MINIO_BUCKET_CERTIFICATES", None)
+        or "vikasana-certificates"
+    ),
+    "faculty": (
+        os.getenv("MINIO_BUCKET_FACULTY")
+        or getattr(settings, "MINIO_BUCKET_FACULTY", None)
+        or "vikasana-faculty"
+    ),
 }
 
 
 LEGACY_PREFIXES = [
+    "minio",
     "activity-uploads",
     "face-verification",
     "vikasana-certificates",
@@ -51,7 +78,7 @@ def clean_s3_key(value: str) -> str:
 
     for prefix in LEGACY_PREFIXES:
         if value.startswith(prefix + "/"):
-            value = value[len(prefix) + 1 :]
+            value = value[len(prefix) + 1:]
             break
 
     if not value:
@@ -89,16 +116,15 @@ def get_s3_client():
         raise RuntimeError("Missing AWS S3 credentials for signed URL generation")
 
     return boto3.client(
-    "s3",
-    region_name=aws_region,
-    endpoint_url=f"https://s3.{aws_region}.amazonaws.com",
-    aws_access_key_id=access_key,
-    aws_secret_access_key=secret_key,
-    config=Config(
-        signature_version="s3v4",
-        s3={"addressing_style": "virtual"},
-    ),
-)
+        "s3",
+        region_name=aws_region,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "virtual"},
+        ),
+    )
 
 
 @router.get("/signed-url")
@@ -115,6 +141,10 @@ async def get_admin_signed_file_url(
     object_key = clean_s3_key(key)
 
     try:
+        print("ADMIN SIGNED URL bucket_type:", bucket_type)
+        print("ADMIN SIGNED URL bucket:", bucket)
+        print("ADMIN SIGNED URL key:", object_key)
+
         s3 = get_s3_client()
 
         signed_url = s3.generate_presigned_url(
