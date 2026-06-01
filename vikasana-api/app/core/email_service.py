@@ -11,7 +11,7 @@ def _brevo_cfg() -> tuple[str, str, str]:
     if not api_key:
         raise RuntimeError("SENDINBLUE_API_KEY not configured")
     from_email = os.getenv("EMAIL_FROM", "admin@vikasana.org")
-    from_name  = os.getenv("EMAIL_FROM_NAME", "Vikasana Foundation")
+    from_name  = os.getenv("EMAIL_FROM_NAME", "LoRaa Connect")
     return api_key, from_email, from_name
 
 
@@ -27,33 +27,33 @@ async def _send(api_key: str, payload: dict) -> None:
 
 
 # ─── Design tokens ────────────────────────────────────────────
-#  Navy  : #0B1F4B   (primary brand, headers, buttons)
-#  Gold  : #C9952A   (accent line, highlights)
-#  Slate : #475569   (body text)
-#  Light : #F7F9FC   (page background)
-#  White : #FFFFFF   (card background)
+#  Navy   : #0A2463   (primary brand, headers, buttons)
+#  Accent : #2E6BE6   (accent rule, highlights)
+#  Slate  : #475569   (body text)
+#  Light  : #F4F7FC   (page background)
+#  White  : #FFFFFF   (card background)
 # ─────────────────────────────────────────────────────────────
 
-_VIKASANA_LOGO = """
+_BRAND_LOGO = """
 <table cellpadding="0" cellspacing="0" style="margin:0 auto;">
   <tr>
-    <td style="padding-right:10px;vertical-align:middle;">
-      <!-- Shield mark -->
-      <svg width="40" height="40" viewBox="0 0 40 40" fill="none"
+    <td style="padding-right:12px;vertical-align:middle;">
+      <!-- Connect mark -->
+      <svg width="42" height="42" viewBox="0 0 42 42" fill="none"
            xmlns="http://www.w3.org/2000/svg">
-        <rect width="40" height="40" rx="10" fill="#0B1F4B"/>
-        <path d="M20 7L32 12V21C32 27.6 26.5 33.4 20 35C13.5 33.4 8 27.6 8 21V12Z"
-              fill="none" stroke="#C9952A" stroke-width="1.8" stroke-linejoin="round"/>
-        <path d="M14 21L18.5 26.5L26 15"
-              stroke="#ffffff" stroke-width="2.2"
-              stroke-linecap="round" stroke-linejoin="round"/>
+        <rect width="42" height="42" rx="11" fill="#173A8C"/>
+        <circle cx="14" cy="14" r="3.6" fill="none" stroke="#A9C5F5" stroke-width="2"/>
+        <circle cx="28" cy="14" r="3.6" fill="none" stroke="#A9C5F5" stroke-width="2"/>
+        <circle cx="21" cy="29" r="3.6" fill="none" stroke="#2E6BE6" stroke-width="2"/>
+        <path d="M16 16.4L19 26M26 16.4L23 26M17.4 14H24.6"
+              stroke="#FFFFFF" stroke-width="1.8" stroke-linecap="round"/>
       </svg>
     </td>
     <td style="vertical-align:middle;">
-      <div style="font-size:17px;font-weight:700;color:#0B1F4B;
-                  letter-spacing:-.2px;line-height:1.1;">Vikasana</div>
-      <div style="font-size:10px;font-weight:500;color:#C9952A;
-                  letter-spacing:2px;text-transform:uppercase;">Foundation</div>
+      <div style="font-size:18px;font-weight:700;color:#FFFFFF;
+                  letter-spacing:-.2px;line-height:1.15;">LoRaa&nbsp;Connect</div>
+      <div style="font-size:10px;font-weight:500;color:#A9C5F5;
+                  letter-spacing:2px;text-transform:uppercase;margin-top:1px;">by LoRaa Ventures</div>
     </td>
   </tr>
 </table>
@@ -62,59 +62,63 @@ _VIKASANA_LOGO = """
 def _wrap(body_html: str, from_email: str = "admin@vikasana.org") -> str:
     """
     Prestigious light-theme shell.
-    Layout: light grey page → white card → navy header band → gold rule → content → footer.
+    Layout: light grey page → white card → navy header band → accent rule → content → footer.
     """
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Vikasana Foundation</title>
+  <title>LoRaa Connect</title>
 </head>
-<body style="margin:0;padding:0;background:#EEF2F7;
+<body style="margin:0;padding:0;background:#E9EFF8;
              font-family:'Segoe UI',Helvetica,Arial,sans-serif;">
 
   <!-- Page wrapper -->
   <table width="100%" cellpadding="0" cellspacing="0"
-         style="background:#EEF2F7;padding:48px 16px;">
+         style="background:#E9EFF8;padding:48px 16px;">
     <tr>
       <td align="center">
 
         <!-- Card -->
         <table width="600" cellpadding="0" cellspacing="0"
                style="max-width:600px;width:100%;background:#ffffff;
-                      border-radius:4px;overflow:hidden;
+                      border-radius:6px;overflow:hidden;
                       border:1px solid #D9E2EE;
-                      box-shadow:0 2px 16px rgba(11,31,75,0.08);">
+                      box-shadow:0 2px 16px rgba(10,36,99,0.08);">
 
           <!-- Navy header band -->
           <tr>
-            <td style="background:#0B1F4B;padding:28px 40px;">
-              {_VIKASANA_LOGO}
+            <td style="background:#0A2463;padding:28px 40px;">
+              {_BRAND_LOGO}
             </td>
           </tr>
 
-          <!-- Gold accent rule -->
+          <!-- Accent rule -->
           <tr>
-            <td style="height:3px;background:#C9952A;font-size:0;line-height:0;">&nbsp;</td>
+            <td style="height:3px;background:#2E6BE6;font-size:0;line-height:0;">&nbsp;</td>
           </tr>
 
           {body_html}
 
           <!-- Divider -->
           <tr>
-            <td style="height:1px;background:#E2E8F0;font-size:0;line-height:0;">&nbsp;</td>
+            <td style="height:1px;background:#E4EAF4;font-size:0;line-height:0;">&nbsp;</td>
           </tr>
 
           <!-- Footer -->
           <tr>
-            <td style="background:#F7F9FC;padding:24px 40px;">
+            <td style="background:#F4F7FC;padding:24px 40px;">
               <table width="100%" cellpadding="0" cellspacing="0">
                 <tr>
                   <td style="text-align:center;">
+                    <p style="margin:0 0 6px;font-size:12px;color:#64748B;line-height:1.7;">
+                      <strong style="color:#173A8C;">LoRaa Connect</strong>
+                      &nbsp;·&nbsp; Powered by
+                      <strong style="color:#173A8C;">Vikasana Foundation</strong>
+                    </p>
                     <p style="margin:0 0 6px;font-size:11px;color:#94A3B8;line-height:1.7;">
-                      © 2026 <strong style="color:#64748b;">Vikasana Foundation</strong>
-                      &nbsp;·&nbsp; Social Activity Tracking Platform
+                      © 2026 LoRaa Ventures &nbsp;·&nbsp; Social Activity Tracking Platform
                     </p>
                     <p style="margin:0;font-size:11px;color:#B0BEC5;line-height:1.6;">
                       You received this because an administrator added you to our platform.
@@ -142,7 +146,7 @@ def _wrap(body_html: str, from_email: str = "admin@vikasana.org") -> str:
 def _store_buttons(play_url: str, apple_url: str) -> str:
     """
     Light-theme Play Store + App Store buttons.
-    Dark pill on white background — clean and professional.
+    Navy pill on white background — clean and professional.
     """
     return f"""
     <tr>
@@ -156,9 +160,9 @@ def _store_buttons(play_url: str, apple_url: str) -> str:
             <!-- Google Play -->
             <td style="padding-right:8px;">
               <a href="{play_url}" target="_blank"
-                 style="display:inline-block;background:#0B1F4B;color:#fff;
-                        text-decoration:none;border-radius:6px;
-                        border:1px solid #0B1F4B;overflow:hidden;">
+                 style="display:inline-block;background:#0A2463;color:#fff;
+                        text-decoration:none;border-radius:8px;
+                        border:1px solid #0A2463;overflow:hidden;">
                 <table cellpadding="0" cellspacing="0">
                   <tr>
                     <td style="padding:10px 14px;vertical-align:middle;">
@@ -174,7 +178,7 @@ def _store_buttons(play_url: str, apple_url: str) -> str:
                       </svg>
                     </td>
                     <td style="padding:10px 14px 10px 0;vertical-align:middle;">
-                      <div style="font-size:8px;color:#94A3B8;font-weight:500;
+                      <div style="font-size:8px;color:#A9C5F5;font-weight:500;
                                   letter-spacing:.8px;line-height:1.2;
                                   text-transform:uppercase;">Get it on</div>
                       <div style="font-size:13px;color:#fff;font-weight:700;
@@ -188,9 +192,9 @@ def _store_buttons(play_url: str, apple_url: str) -> str:
             <!-- App Store -->
             <td style="padding-left:8px;">
               <a href="{apple_url}" target="_blank"
-                 style="display:inline-block;background:#0B1F4B;color:#fff;
-                        text-decoration:none;border-radius:6px;
-                        border:1px solid #0B1F4B;overflow:hidden;">
+                 style="display:inline-block;background:#0A2463;color:#fff;
+                        text-decoration:none;border-radius:8px;
+                        border:1px solid #0A2463;overflow:hidden;">
                 <table cellpadding="0" cellspacing="0">
                   <tr>
                     <td style="padding:10px 14px;vertical-align:middle;">
@@ -210,7 +214,7 @@ def _store_buttons(play_url: str, apple_url: str) -> str:
                       </svg>
                     </td>
                     <td style="padding:10px 14px 10px 0;vertical-align:middle;">
-                      <div style="font-size:8px;color:#94A3B8;font-weight:500;
+                      <div style="font-size:8px;color:#A9C5F5;font-weight:500;
                                   letter-spacing:.8px;line-height:1.2;
                                   text-transform:uppercase;">Download on the</div>
                       <div style="font-size:13px;color:#fff;font-weight:700;
@@ -228,13 +232,13 @@ def _store_buttons(play_url: str, apple_url: str) -> str:
 
 
 def _otp_digits(otp: str) -> str:
-    """Render each OTP digit in a clean bordered box — no dark backgrounds."""
+    """Render each OTP digit in a clean bordered box — light theme."""
     boxes = "".join([
         f"""<td style="padding:0 5px;">
               <div style="width:46px;height:56px;line-height:56px;text-align:center;
-                          font-size:28px;font-weight:700;background:#F7F9FC;
-                          border-radius:6px;border:1.5px solid #CBD5E1;
-                          color:#0B1F4B;font-family:'Courier New',monospace;">{d}</div>
+                          font-size:28px;font-weight:700;background:#EEF3FC;
+                          border-radius:8px;border:1.5px solid #2E6BE6;
+                          color:#0A2463;font-family:'Courier New',monospace;">{d}</div>
             </td>"""
         for d in otp
     ])
@@ -251,27 +255,27 @@ def _otp_digits(otp: str) -> str:
 
 async def send_activation_email(to_email: str, to_name: str, activate_url: str) -> None:
     api_key, from_email, from_name = _brevo_cfg()
-    subject = "Invitation — Activate Your Faculty Account | Vikasana Foundation"
+    subject = "Invitation — Activate Your Faculty Account | LoRaa Connect"
 
     body = f"""
           <!-- Greeting section -->
           <tr>
             <td style="padding:40px 40px 0;">
-              <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#C9952A;
+              <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#2E6BE6;
                         text-transform:uppercase;letter-spacing:1.5px;">
                 Faculty Invitation
               </p>
-              <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#0B1F4B;
+              <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#0A2463;
                          line-height:1.3;letter-spacing:-.3px;">
                 Welcome, {to_name}
               </h1>
             </td>
           </tr>
 
-          <!-- Thin gold rule under heading -->
+          <!-- Thin accent rule under heading -->
           <tr>
             <td style="padding:16px 40px 0;">
-              <div style="width:40px;height:2px;background:#C9952A;"></div>
+              <div style="width:40px;height:2px;background:#2E6BE6;"></div>
             </td>
           </tr>
 
@@ -279,10 +283,10 @@ async def send_activation_email(to_email: str, to_name: str, activate_url: str) 
           <tr>
             <td style="padding:24px 40px 0;">
               <p style="margin:0;font-size:15px;color:#475569;line-height:1.75;">
-                You have been invited to join the
-                <strong style="color:#0B1F4B;">Vikasana Foundation</strong>
-                Social Activity Tracking platform as a Faculty Member.
-                Please activate your account using the button below.
+                You have been invited to join
+                <strong style="color:#0A2463;">LoRaa Connect</strong>,
+                the Social Activity Tracking platform powered by Vikasana Foundation,
+                as a Faculty Member. Please activate your account using the button below.
               </p>
             </td>
           </tr>
@@ -291,17 +295,17 @@ async def send_activation_email(to_email: str, to_name: str, activate_url: str) 
           <tr>
             <td style="padding:24px 40px 0;">
               <table width="100%" cellpadding="0" cellspacing="0"
-                     style="border:1px solid #D9E2EE;border-radius:4px;
-                            border-left:3px solid #0B1F4B;">
+                     style="border:1px solid #D9E2EE;border-radius:6px;
+                            border-left:3px solid #0A2463;">
                 <tr>
                   <td style="padding:16px 20px;">
                     <p style="margin:0 0 2px;font-size:10px;font-weight:700;color:#94A3B8;
                                text-transform:uppercase;letter-spacing:1.2px;">Account Details</p>
-                    <p style="margin:4px 0 0;font-size:15px;font-weight:600;color:#0B1F4B;">
+                    <p style="margin:4px 0 0;font-size:15px;font-weight:600;color:#0A2463;">
                       {to_email}
                     </p>
                     <p style="margin:4px 0 0;font-size:13px;color:#64748B;">
-                      Role:&nbsp;<span style="color:#C9952A;font-weight:600;">Faculty Member</span>
+                      Role:&nbsp;<span style="color:#2E6BE6;font-weight:600;">Faculty Member</span>
                     </p>
                   </td>
                 </tr>
@@ -314,7 +318,7 @@ async def send_activation_email(to_email: str, to_name: str, activate_url: str) 
             <td style="padding:32px 40px 0;">
               <table cellpadding="0" cellspacing="0">
                 <tr>
-                  <td style="background:#0B1F4B;border-radius:4px;">
+                  <td style="background:#0A2463;border-radius:8px;">
                     <a href="{activate_url}"
                        style="display:inline-block;padding:14px 36px;
                               color:#ffffff;text-decoration:none;
@@ -332,7 +336,7 @@ async def send_activation_email(to_email: str, to_name: str, activate_url: str) 
           <tr>
             <td style="padding:20px 40px 0;">
               <table width="100%" cellpadding="0" cellspacing="0"
-                     style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:4px;">
+                     style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:6px;">
                 <tr>
                   <td style="padding:12px 16px;">
                     <p style="margin:0;font-size:13px;color:#92400E;line-height:1.6;">
@@ -353,7 +357,7 @@ async def send_activation_email(to_email: str, to_name: str, activate_url: str) 
                 If the button above does not work, copy and paste the link below
                 into your browser:<br/>
                 <a href="{activate_url}"
-                   style="color:#0B1F4B;font-size:11px;word-break:break-all;">
+                   style="color:#0A2463;font-size:11px;word-break:break-all;">
                   {activate_url}
                 </a>
               </p>
@@ -376,17 +380,17 @@ async def send_activation_email(to_email: str, to_name: str, activate_url: str) 
 
 async def send_faculty_otp_email(to_email: str, to_name: str, otp: str) -> None:
     api_key, from_email, from_name = _brevo_cfg()
-    subject = "Your Verification Code — Vikasana Foundation"
+    subject = "Your Verification Code — LoRaa Connect"
 
     body = f"""
           <!-- Greeting -->
           <tr>
             <td style="padding:40px 40px 0;">
-              <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#C9952A;
+              <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#2E6BE6;
                         text-transform:uppercase;letter-spacing:1.5px;">
                 Account Activation
               </p>
-              <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#0B1F4B;
+              <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#0A2463;
                          line-height:1.3;">
                 Verification Code
               </h1>
@@ -394,14 +398,14 @@ async def send_faculty_otp_email(to_email: str, to_name: str, otp: str) -> None:
           </tr>
           <tr>
             <td style="padding:16px 40px 0;">
-              <div style="width:40px;height:2px;background:#C9952A;"></div>
+              <div style="width:40px;height:2px;background:#2E6BE6;"></div>
             </td>
           </tr>
 
           <tr>
             <td style="padding:24px 40px 0;">
               <p style="margin:0;font-size:15px;color:#475569;line-height:1.75;">
-                Hello <strong style="color:#0B1F4B;">{to_name}</strong>,
+                Hello <strong style="color:#0A2463;">{to_name}</strong>,
                 please use the verification code below to complete your
                 faculty account activation.
               </p>
@@ -439,12 +443,12 @@ async def send_faculty_otp_email(to_email: str, to_name: str, otp: str) -> None:
           <tr>
             <td style="padding:24px 40px 36px;">
               <table width="100%" cellpadding="0" cellspacing="0"
-                     style="background:#F7F9FC;border:1px solid #E2E8F0;
-                            border-radius:4px;border-left:3px solid #94A3B8;">
+                     style="background:#EEF3FC;border:1px solid #E4EAF4;
+                            border-radius:6px;border-left:3px solid #2E6BE6;">
                 <tr>
                   <td style="padding:14px 18px;">
                     <p style="margin:0;font-size:13px;color:#64748B;line-height:1.65;">
-                      <strong>Security reminder:</strong> Vikasana Foundation will never
+                      <strong>Security reminder:</strong> LoRaa Connect will never
                       ask you to share this code with anyone. If you did not request this,
                       please disregard this email — your account remains secure.
                     </p>
@@ -480,10 +484,10 @@ async def send_student_welcome_email(
     app_store_url: str  = "https://apps.apple.com/app/vikasana/id000000000",
 ) -> None:
     api_key, from_email, from_name = _brevo_cfg()
-    subject = "Welcome to Vikasana Foundation — Get Started Today"
+    subject = "Welcome to LoRaa Connect — Get Started Today"
 
     steps = [
-        ("01", "Download the Vikasana app from the <strong>Play Store</strong> or <strong>App Store</strong>."),
+        ("01", "Download the LoRaa Connect app from the <strong>Play Store</strong> or <strong>App Store</strong>."),
         ("02", f"Open the app and enter your registered email: <strong>{to_email}</strong>"),
         ("03", "Enter the OTP sent to your inbox — no password needed."),
     ]
@@ -492,8 +496,8 @@ async def send_student_welcome_email(
               <tr>
                 <td width="36" style="vertical-align:top;padding-top:1px;">
                   <div style="width:32px;height:32px;line-height:32px;text-align:center;
-                              border-radius:4px;font-size:11px;font-weight:700;
-                              color:#ffffff;background:#0B1F4B;
+                              border-radius:8px;font-size:11px;font-weight:700;
+                              color:#ffffff;background:#0A2463;
                               font-family:'Courier New',monospace;">{n}</div>
                 </td>
                 <td style="padding-left:14px;vertical-align:top;
@@ -510,11 +514,11 @@ async def send_student_welcome_email(
           <!-- Greeting -->
           <tr>
             <td style="padding:40px 40px 0;">
-              <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#C9952A;
+              <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#2E6BE6;
                         text-transform:uppercase;letter-spacing:1.5px;">
                 Student Enrollment
               </p>
-              <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#0B1F4B;
+              <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#0A2463;
                          line-height:1.3;letter-spacing:-.2px;">
                 Welcome, {to_name}
               </h1>
@@ -522,7 +526,7 @@ async def send_student_welcome_email(
           </tr>
           <tr>
             <td style="padding:16px 40px 0;">
-              <div style="width:40px;height:2px;background:#C9952A;"></div>
+              <div style="width:40px;height:2px;background:#2E6BE6;"></div>
             </td>
           </tr>
 
@@ -530,10 +534,11 @@ async def send_student_welcome_email(
           <tr>
             <td style="padding:24px 40px 0;">
               <p style="margin:0;font-size:15px;color:#475569;line-height:1.75;">
-                Your faculty has enrolled you in the
-                <strong style="color:#0B1F4B;">Vikasana Foundation</strong>
-                learning platform. Download the app to begin — login is
-                seamless and passwordless via one-time passcode.
+                Your faculty has enrolled you in
+                <strong style="color:#0A2463;">LoRaa Connect</strong>,
+                the activity tracking platform powered by Vikasana Foundation.
+                Download the app to begin — login is seamless and passwordless
+                via one-time passcode.
               </p>
             </td>
           </tr>
@@ -542,15 +547,15 @@ async def send_student_welcome_email(
           <tr>
             <td style="padding:24px 40px 0;">
               <table width="100%" cellpadding="0" cellspacing="0"
-                     style="border:1px solid #D9E2EE;border-radius:4px;
-                            border-left:3px solid #C9952A;">
+                     style="border:1px solid #D9E2EE;border-radius:6px;
+                            border-left:3px solid #2E6BE6;">
                 <tr>
                   <td style="padding:14px 20px;">
                     <p style="margin:0 0 2px;font-size:10px;font-weight:700;color:#94A3B8;
                                text-transform:uppercase;letter-spacing:1.2px;">
                       Your Registered Email
                     </p>
-                    <p style="margin:4px 0 0;font-size:15px;font-weight:600;color:#0B1F4B;">
+                    <p style="margin:4px 0 0;font-size:15px;font-weight:600;color:#0A2463;">
                       {to_email}
                     </p>
                     <p style="margin:4px 0 0;font-size:12px;color:#64748B;">
@@ -590,7 +595,7 @@ async def send_student_welcome_email(
               <p style="margin:0;font-size:12px;color:#94A3B8;">
                 Or download directly:&nbsp;
                 <a href="{app_download_url}"
-                   style="color:#0B1F4B;font-weight:600;text-decoration:underline;">
+                   style="color:#0A2463;font-weight:600;text-decoration:underline;">
                   {app_download_url}
                 </a>
               </p>
@@ -622,17 +627,17 @@ async def send_student_welcome_email(
 
 async def send_student_otp_email(to_email: str, to_name: str, otp: str) -> None:
     api_key, from_email, from_name = _brevo_cfg()
-    subject = "Your Login Code — Vikasana Foundation"
+    subject = "Your Login Code — LoRaa Connect"
 
     body = f"""
           <!-- Greeting -->
           <tr>
             <td style="padding:40px 40px 0;">
-              <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#C9952A;
+              <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#2E6BE6;
                         text-transform:uppercase;letter-spacing:1.5px;">
                 Student Login
               </p>
-              <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#0B1F4B;
+              <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#0A2463;
                          line-height:1.3;">
                 Your Verification Code
               </h1>
@@ -640,15 +645,15 @@ async def send_student_otp_email(to_email: str, to_name: str, otp: str) -> None:
           </tr>
           <tr>
             <td style="padding:16px 40px 0;">
-              <div style="width:40px;height:2px;background:#C9952A;"></div>
+              <div style="width:40px;height:2px;background:#2E6BE6;"></div>
             </td>
           </tr>
 
           <tr>
             <td style="padding:24px 40px 0;">
               <p style="margin:0;font-size:15px;color:#475569;line-height:1.75;">
-                Hello <strong style="color:#0B1F4B;">{to_name}</strong>,
-                use the passcode below to sign in to your Vikasana account.
+                Hello <strong style="color:#0A2463;">{to_name}</strong>,
+                use the passcode below to sign in to your LoRaa Connect account.
               </p>
             </td>
           </tr>
@@ -684,12 +689,12 @@ async def send_student_otp_email(to_email: str, to_name: str, otp: str) -> None:
           <tr>
             <td style="padding:24px 40px 36px;">
               <table width="100%" cellpadding="0" cellspacing="0"
-                     style="background:#F7F9FC;border:1px solid #E2E8F0;
-                            border-radius:4px;border-left:3px solid #94A3B8;">
+                     style="background:#EEF3FC;border:1px solid #E4EAF4;
+                            border-radius:6px;border-left:3px solid #2E6BE6;">
                 <tr>
                   <td style="padding:14px 18px;">
                     <p style="margin:0;font-size:13px;color:#64748B;line-height:1.65;">
-                      <strong>Security reminder:</strong> Vikasana Foundation will never
+                      <strong>Security reminder:</strong> LoRaa Connect will never
                       ask you to share this code. If you did not initiate this request,
                       please disregard this email — your account is secure.
                     </p>
