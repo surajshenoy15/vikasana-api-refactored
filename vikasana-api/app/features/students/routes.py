@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, func
+from sqlalchemy import select, or_, func, cast, String
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
@@ -10,7 +10,7 @@ from app.core.dependencies import get_current_faculty, get_current_admin, get_cu
 from app.features.faculty.models import Faculty
 from app.features.auth.models import Admin
 from app.features.students.models import Student, StudentType
-from app.features.events.models import EventSubmission
+from app.features.events.models import Event, EventSubmission
 from app.features.certificates.models import Certificate
 
 from app.features.students.service import create_student, create_students_from_csv
@@ -522,13 +522,86 @@ async def delete_student_activity_point_admin(
 # ─────────────────────────────────────────────────────────────
 # STUDENT ROUTES (PROFILE)
 # ─────────────────────────────────────────────────────────────
+def _event_visible_conditions():
+    conditions = []
+
+    if hasattr(Event, "is_deleted"):
+        conditions.append(Event.is_deleted == False)
+
+    if hasattr(Event, "deleted_at"):
+        conditions.append(Event.deleted_at.is_(None))
+
+    if hasattr(Event, "is_active"):
+        conditions.append(Event.is_active == True)
+
+    return conditions
+
+
+async def _calculate_visible_student_points(db: AsyncSession, student_id: int) -> int:
+    """
+    Recalculate student points from visible/non-deleted events only.
+
+    Why:
+    - Student.total_points_earned is stored and may include old deleted events.
+    - App dashboard reads /students/me.
+    - So /students/me must calculate fresh visible points.
+    """
+
+    event_conditions = _event_visible_conditions()
+
+    stmt = (
+        select(ActivitySession, ActivityType)
+        .select_from(ActivitySession)
+        .join(ActivityType, ActivityType.id == ActivitySession.activity_type_id)
+        .join(Event, func.lower(Event.title) == func.lower(ActivitySession.activity_name))
+        .where(
+            ActivitySession.student_id == student_id,
+            ActivityType.is_active == True,
+            func.lower(cast(ActivitySession.status, String)) == "approved",
+            *event_conditions,
+        )
+        .order_by(ActivitySession.id.desc())
+    )
+
+    rows = (await db.execute(stmt)).all()
+
+    total_points = 0
+
+    for session, activity_type in rows:
+        existing_points = (
+            getattr(session, "points_awarded", None)
+            or getattr(session, "awarded_points", None)
+            or getattr(session, "points", None)
+            or 0
+        )
+
+        points = int(existing_points or 0)
+
+        if points <= 0:
+            duration_hours = float(getattr(session, "duration_hours", 0) or 0)
+            hours_per_unit = float(getattr(activity_type, "hours_per_unit", 0) or 0)
+            points_per_unit = int(getattr(activity_type, "points_per_unit", 0) or 0)
+            max_points = int(getattr(activity_type, "max_points", 0) or 0)
+
+            if hours_per_unit > 0 and points_per_unit > 0:
+                points = int((duration_hours / hours_per_unit) * points_per_unit)
+
+                if max_points > 0:
+                    points = min(points, max_points)
+
+        total_points += max(points, 0)
+
+    return int(total_points)
 student_router = APIRouter(prefix="/students", tags=["Student - Profile"])
 
 
 @student_router.get("/me")
 async def get_student_me(
+    db: AsyncSession = Depends(get_db),
     current_student: Student = Depends(get_current_student),
 ):
+    visible_points = await _calculate_visible_student_points(db, current_student.id)
+
     return {
         "id": current_student.id,
         "name": current_student.name,
@@ -539,5 +612,7 @@ async def get_student_me(
         "face_enrolled": current_student.face_enrolled,
         "face_enrolled_at": current_student.face_enrolled_at,
         "required_total_points": current_student.required_total_points,
-        "total_points_earned": current_student.total_points_earned,
+
+        # ✅ dynamic visible points only, not old stored value
+        "total_points_earned": visible_points,
     }
