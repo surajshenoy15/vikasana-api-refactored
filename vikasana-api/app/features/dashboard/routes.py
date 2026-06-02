@@ -215,6 +215,11 @@ async def student_progress(
 # Shows real event title instead of hardcoded "Event Submission"
 # certificate = if any certificate exists for that submission_id
 # ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# 4) RECENT SUBMISSIONS
+# Shows real event title instead of hardcoded "Event Submission"
+# certificate = if any certificate exists for that submission_id
+# ─────────────────────────────────────────────────────────────
 
 @router.get("/recent-submissions")
 async def recent_submissions(
@@ -249,14 +254,12 @@ async def recent_submissions(
             select(
                 Certificate.submission_id.label("submission_id"),
                 Certificate.id.label("certificate_id"),
-                Certificate.certificate_number.label("certificate_number"),
             ).where(Certificate.submission_id.in_(submission_ids))
         )
 
         cert_map = {
             r.submission_id: {
                 "certificate_id": r.certificate_id,
-                "certificate_number": r.certificate_number,
             }
             for r in cert_q.all()
         }
@@ -264,7 +267,11 @@ async def recent_submissions(
     result = []
 
     for r in rows:
-        event_title = _safe_event_title(r.event_title, r.event_id)
+        event_title = (r.event_title or "").strip()
+
+        if not event_title:
+            event_title = f"Event #{r.event_id}" if r.event_id else "Unknown Event"
+
         cert = cert_map.get(r.submission_id)
 
         result.append(
@@ -272,21 +279,18 @@ async def recent_submissions(
                 "id": r.submission_id,
                 "student": r.student,
 
-                # Important fields for dashboard frontend
+                # ✅ actual event data
                 "event_id": r.event_id,
                 "event_title": event_title,
-
-                # Keep title also as actual event title for old frontend compatibility
                 "title": event_title,
 
                 "category": "Event",
                 "submittedOn": r.submittedOn.isoformat() if r.submittedOn else None,
-                "status": _status_to_str(r.status),
+                "status": str(getattr(r.status, "value", r.status)),
 
-                # Certificate generated or not
+                # ✅ certificate generated or not
                 "certificate": cert is not None,
                 "certificate_id": cert.get("certificate_id") if cert else None,
-                "certificate_number": cert.get("certificate_number") if cert else None,
             }
         )
 
