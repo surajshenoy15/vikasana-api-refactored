@@ -182,161 +182,138 @@ async def create_session(
 
 async def list_student_sessions(db: AsyncSession, student_id: int):
     """
-    Returns enriched activity history for the logged-in student.
-    Used by:
-      GET /api/student/activity/sessions
+    Student app history.
+    Source of truth: EventSubmission + Event.
 
-    This returns app-friendly fields:
-    - real activity/event name
-    - category/activity type name
-    - proper points earned
-    - date/time/location
+    This hides deleted events because we only return rows that still have
+    a matching active Event row.
     """
 
-    res = await db.execute(
-    select(ActivitySession)
-    .join(ActivityType, ActivityType.id == ActivitySession.activity_type_id)
-    .where(
-        ActivitySession.student_id == student_id,
-        ActivityType.is_active == True,
-    )
-    .order_by(
-        ActivitySession.submitted_at.desc().nullslast(),
-        ActivitySession.started_at.desc(),
-        ActivitySession.id.desc(),
-    )
-)
+    from app.features.events.models import Event, EventSubmission
+    from app.features.certificates.models import Certificate
 
-    sessions = res.scalars().all()
+    event_conditions = []
 
-    if not sessions:
+    if hasattr(Event, "is_deleted"):
+        event_conditions.append(Event.is_deleted == False)
+
+    if hasattr(Event, "deleted_at"):
+        event_conditions.append(Event.deleted_at.is_(None))
+
+    if hasattr(Event, "is_active"):
+        event_conditions.append(Event.is_active == True)
+
+    stmt = (
+        select(
+            EventSubmission.id.label("submission_id"),
+            EventSubmission.event_id.label("event_id"),
+            EventSubmission.student_id.label("student_id"),
+            EventSubmission.submitted_at.label("submitted_at"),
+            EventSubmission.status.label("status"),
+
+            Event.title.label("event_title"),
+            Event.event_date.label("event_date"),
+            Event.start_time.label("event_start_time"),
+            Event.venue_name.label("event_location"),
+            Event.category.label("event_category"),
+        )
+        .select_from(EventSubmission)
+        .join(Event, Event.id == EventSubmission.event_id)
+        .where(
+            EventSubmission.student_id == student_id,
+            EventSubmission.submitted_at.isnot(None),
+            *event_conditions,
+        )
+        .order_by(
+            EventSubmission.submitted_at.desc(),
+            EventSubmission.id.desc(),
+        )
+    )
+
+    rows = (await db.execute(stmt)).all()
+
+    if not rows:
         return []
 
-    activity_type_ids = list(
-        {
-            int(s.activity_type_id)
-            for s in sessions
-            if getattr(s, "activity_type_id", None) is not None
-        }
-    )
+    submission_ids = [r.submission_id for r in rows]
 
-    activity_type_map = {}
-
-    if activity_type_ids:
-        at_res = await db.execute(
-            select(ActivityType).where(ActivityType.id.in_(activity_type_ids))
+    cert_set = set()
+    if submission_ids:
+        cert_q = await db.execute(
+            select(Certificate.submission_id).where(
+                Certificate.submission_id.in_(submission_ids)
+            )
         )
-
-        activity_type_map = {
-            at.id: at
-            for at in at_res.scalars().all()
-        }
+        cert_set = {x[0] for x in cert_q.all()}
 
     result = []
 
-    for session in sessions:
-        at = activity_type_map.get(getattr(session, "activity_type_id", None))
+    for r in rows:
+        raw_status = getattr(r.status, "value", r.status)
+        status_value = str(raw_status or "").upper()
 
-        raw_status = getattr(session, "status", None)
-        status_value = raw_status.value if hasattr(raw_status, "value") else str(raw_status or "")
+        event_title = (r.event_title or "").strip()
+        if not event_title:
+            event_title = f"Event #{r.event_id}"
 
-        duration_hours = float(getattr(session, "duration_hours", 0) or 0)
+        # Use event points if your Event model has points/max_points.
+        event_obj_points = 0
+        try:
+            # If Event.points exists in your model, use separate query-safe fallback.
+            pass
+        except Exception:
+            pass
 
-        hours_per_unit = float(getattr(at, "hours_per_unit", 0) or 0) if at else 0
-        points_per_unit = int(getattr(at, "points_per_unit", 0) or 0) if at else 0
-        max_points = int(getattr(at, "max_points", 0) or 0) if at else 0
+        points_awarded = 0
 
-        existing_points = (
-            getattr(session, "points_awarded", None)
-            or getattr(session, "awarded_points", None)
-            or getattr(session, "points", None)
-            or 0
-        )
+        # Certificate exists means generated/approved record.
+        # If you want exact points, use the same formula/source used for /students/me.
+        if status_value == "APPROVED":
+            points_awarded = 0
 
-        points_awarded = int(existing_points or 0)
+            # Optional: if Event has points column, fetch it separately below.
+            ev_points_q = await db.execute(
+                select(Event.points).where(Event.id == r.event_id)
+            ) if hasattr(Event, "points") else None
 
-        # If points are not stored in ActivitySession, calculate from ActivityType rule.
-        # Only approved sessions should show earned points.
-        if points_awarded <= 0 and status_value.upper() == "APPROVED":
-            if hours_per_unit > 0 and points_per_unit > 0:
-                units = duration_hours / hours_per_unit
-                points_awarded = int(units * points_per_unit)
-
-                if max_points > 0:
-                    points_awarded = min(points_awarded, max_points)
-
-            # fallback: if duration is too small but approved, give one unit points
-            # this avoids showing 0 for approved sessions like short testing events
-            if points_awarded <= 0 and points_per_unit > 0:
-                points_awarded = points_per_unit
-                if max_points > 0:
-                    points_awarded = min(points_awarded, max_points)
-
-        activity_name = (
-            getattr(session, "activity_name", None)
-            or getattr(at, "name", None)
-            or f"Activity #{getattr(session, 'activity_type_id', '')}"
-        )
-
-        event_date = None
-        if getattr(session, "submitted_at", None):
-            event_date = session.submitted_at.date().isoformat()
-        elif getattr(session, "started_at", None):
-            event_date = session.started_at.date().isoformat()
-
-        event_start_time = None
-        if getattr(session, "started_at", None):
-            event_start_time = session.started_at.time().isoformat(timespec="seconds")
-
-        event_location = (
-            getattr(at, "venue_name", None)
-            or getattr(at, "location", None)
-            or getattr(at, "maps_url", None)
-        ) if at else None
+            if ev_points_q is not None:
+                points_awarded = int(ev_points_q.scalar() or 0)
 
         result.append(
             {
-                "id": session.id,
-                "session_id": session.id,
-                "submission_id": session.id,
+                "id": r.submission_id,
+                "session_id": r.submission_id,
+                "submission_id": r.submission_id,
 
-                # App history compatibility
-                "event_id": getattr(session, "activity_type_id", None),
-                "activity_type_id": getattr(session, "activity_type_id", None),
+                "event_id": r.event_id,
+                "activity_type_id": None,
 
-                # Real name shown in app history
-                "event_title": activity_name,
-                "title": activity_name,
-                "activity_name": activity_name,
+                "event_title": event_title,
+                "title": event_title,
+                "activity_name": event_title,
 
-                # Category/type shown in app
-                "event_category": getattr(at, "name", None) if at else "Activity",
-                "category": getattr(at, "name", None) if at else "Activity",
+                "event_category": r.event_category or "Event",
+                "category": r.event_category or "Event",
 
-                "event_date": event_date,
-                "event_start_time": event_start_time,
-                "event_location": event_location,
+                "event_date": r.event_date.isoformat() if r.event_date else None,
+                "event_start_time": str(r.event_start_time) if r.event_start_time else None,
+                "event_location": r.event_location,
 
                 "status": status_value,
-                "started_at": session.started_at.isoformat() if session.started_at else None,
-                "submitted_at": session.submitted_at.isoformat() if session.submitted_at else None,
-                "duration_hours": duration_hours,
-                "flag_reason": getattr(session, "flag_reason", None),
+                "started_at": None,
+                "submitted_at": r.submitted_at.isoformat() if r.submitted_at else None,
+                "duration_hours": 0,
+                "flag_reason": None,
 
-                # Proper activity points
+                "certificate": r.submission_id in cert_set,
+
                 "points_awarded": points_awarded,
                 "awarded_points": points_awarded,
                 "points": points_awarded,
-
-                # Optional rule info for frontend/debug
-                "hours_per_unit": hours_per_unit,
-                "points_per_unit": points_per_unit,
-                "max_points": max_points,
             }
         )
 
     return result
-
 # ─────────────────────────────────────────────
 # Add Photo (STRICT 500m geofence enforcement)
 # ─────────────────────────────────────────────
