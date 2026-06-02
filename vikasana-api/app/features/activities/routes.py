@@ -518,7 +518,40 @@ async def my_sessions(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    return await list_student_sessions(db, student.id)
+    sessions = await list_student_sessions(db, student.id)
+
+    # ✅ Keep events that are not deleted.
+    # Includes active + ended/past events.
+    conditions = []
+
+    if hasattr(Event, "is_deleted"):
+        conditions.append(Event.is_deleted == False)
+
+    if hasattr(Event, "deleted_at"):
+        conditions.append(Event.deleted_at.is_(None))
+
+    visible_events_res = await db.execute(
+        select(Event.title).where(*conditions)
+    )
+
+    visible_titles = {
+        str(title or "").strip().lower()
+        for title in visible_events_res.scalars().all()
+        if title
+    }
+
+    filtered = []
+    for s in sessions:
+        name = (
+            getattr(s, "activity_name", None)
+            if not isinstance(s, dict)
+            else s.get("activity_name") or s.get("title") or s.get("event_title")
+        )
+
+        if str(name or "").strip().lower() in visible_titles:
+            filtered.append(s)
+
+    return filtered
 
 
 @router.get("/sessions/{session_id}", response_model=SessionDetailOut)
