@@ -13,6 +13,9 @@ from app.features.students.models import Student, StudentType
 from app.features.events.models import Event, EventSubmission
 from app.features.certificates.models import Certificate
 
+# ✅ FIX: Required for /students/me visible points calculation
+from app.features.activities.models import ActivitySession, ActivityType
+
 from app.features.students.service import create_student, create_students_from_csv
 from app.features.students.points_service import (
     get_student_point_adjustments,
@@ -57,9 +60,15 @@ class StudentPointsUpdate(BaseModel):
 def _normalize_student_type(v: str | None) -> str | None:
     if v is None:
         return None
+
     v = str(v).strip().upper()
+
     if v not in (StudentType.REGULAR.value, StudentType.DIPLOMA.value):
-        raise HTTPException(status_code=422, detail="student_type must be REGULAR or DIPLOMA")
+        raise HTTPException(
+            status_code=422,
+            detail="student_type must be REGULAR or DIPLOMA",
+        )
+
     return v
 
 
@@ -79,7 +88,9 @@ def _student_out(
         passout_year=s.passout_year,
         admitted_year=s.admitted_year,
         college=s.college,
-        faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
+        faculty_mentor_name=(
+            s.created_by_faculty.full_name if s.created_by_faculty else None
+        ),
         activities_count=int(activities_count or 0),
         certificates_count=int(certificates_count or 0),
         total_points_earned=int(s.total_points_earned or 0),
@@ -198,7 +209,9 @@ async def add_student_manual(
             faculty_college=current_faculty.college,
             faculty_id=current_faculty.id,
         )
+
         return _student_out(s, activities_count=0, certificates_count=0)
+
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -333,7 +346,9 @@ async def update_student_admin(
         .options(selectinload(Student.created_by_faculty))
         .where(Student.id == student_id)
     )
+
     s = res.scalar_one_or_none()
+
     if not s:
         raise HTTPException(status_code=404, detail="Student not found")
 
@@ -341,14 +356,19 @@ async def update_student_admin(
 
     if "name" in data and data["name"] is not None:
         data["name"] = str(data["name"]).strip()
+
     if "college" in data and data["college"] is not None:
         data["college"] = str(data["college"]).strip()
+
     if "usn" in data and data["usn"] is not None:
         data["usn"] = str(data["usn"]).strip()
+
     if "branch" in data and data["branch"] is not None:
         data["branch"] = str(data["branch"]).strip()
+
     if "email" in data and data["email"] is not None:
         data["email"] = str(data["email"]).strip().lower()
+
     if "student_type" in data:
         data["student_type"] = _normalize_student_type(data.get("student_type"))
 
@@ -356,6 +376,7 @@ async def update_student_admin(
         dup = await db.execute(
             select(Student.id).where(Student.usn == data["usn"], Student.id != s.id)
         )
+
         if dup.scalar_one_or_none():
             raise HTTPException(status_code=409, detail="USN already exists")
 
@@ -363,12 +384,14 @@ async def update_student_admin(
         dup = await db.execute(
             select(Student.id).where(Student.email == data["email"], Student.id != s.id)
         )
+
         if dup.scalar_one_or_none():
             raise HTTPException(status_code=409, detail="Email already exists")
 
     for k, v in data.items():
         if v is None:
             continue
+
         setattr(s, k, v)
 
     await db.commit()
@@ -377,11 +400,13 @@ async def update_student_admin(
     act_res = await db.execute(
         select(func.count(EventSubmission.id)).where(EventSubmission.student_id == s.id)
     )
+
     activities_count = act_res.scalar() or 0
 
     cert_res = await db.execute(
         select(func.count(Certificate.id)).where(Certificate.student_id == s.id)
     )
+
     certificates_count = cert_res.scalar() or 0
 
     return _student_out(
@@ -399,6 +424,7 @@ async def update_student_points_admin(
     current_admin: Admin = Depends(get_current_admin),
 ):
     s = await db.get(Student, student_id)
+
     if not s:
         raise HTTPException(status_code=404, detail="Student not found")
 
@@ -427,10 +453,12 @@ async def get_student_activity_points_admin(
 ):
     try:
         student, items = await get_student_point_adjustments(db, student_id=student_id)
+
         return StudentPointAdjustmentListOut(
             total_points=int(student.total_points_earned or 0),
             items=[_point_item_out(x) for x in items],
         )
+
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -454,18 +482,25 @@ async def create_student_activity_point_admin(
             remarks=payload.remarks,
             created_by_admin_id=current_admin.id,
         )
+
         return StudentPointAdjustmentWriteResponse(
             total_points=int(total_points),
             item=_point_item_out(item),
         )
+
     except ValueError as e:
         msg = str(e)
+
         if msg == "Student not found":
             raise HTTPException(status_code=404, detail=msg)
+
         raise HTTPException(status_code=400, detail=msg)
 
 
-activity_points_admin_router = APIRouter(prefix="/admin/activity-points", tags=["Admin - Activity Points"])
+activity_points_admin_router = APIRouter(
+    prefix="/admin/activity-points",
+    tags=["Admin - Activity Points"],
+)
 
 
 @activity_points_admin_router.put("/{adjustment_id}", response_model=StudentPointAdjustmentWriteResponse)
@@ -486,14 +521,18 @@ async def update_student_activity_point_admin(
             status=payload.status,
             remarks=payload.remarks,
         )
+
         return StudentPointAdjustmentWriteResponse(
             total_points=int(total_points),
             item=_point_item_out(item),
         )
+
     except ValueError as e:
         msg = str(e)
+
         if msg in {"Activity point entry not found", "Student not found"}:
             raise HTTPException(status_code=404, detail=msg)
+
         raise HTTPException(status_code=400, detail=msg)
 
 
@@ -508,14 +547,18 @@ async def delete_student_activity_point_admin(
             db,
             adjustment_id=adjustment_id,
         )
+
         return {
             "success": True,
             "total_points": int(total_points),
         }
+
     except ValueError as e:
         msg = str(e)
+
         if msg in {"Activity point entry not found", "Student not found"}:
             raise HTTPException(status_code=404, detail=msg)
+
         raise HTTPException(status_code=400, detail=msg)
 
 
@@ -547,51 +590,65 @@ async def _calculate_visible_student_points(db: AsyncSession, student_id: int) -
     - So /students/me must calculate fresh visible points.
     """
 
-    event_conditions = _event_visible_conditions()
+    try:
+        event_conditions = _event_visible_conditions()
 
-    stmt = (
-        select(ActivitySession, ActivityType)
-        .select_from(ActivitySession)
-        .join(ActivityType, ActivityType.id == ActivitySession.activity_type_id)
-        .join(Event, func.lower(Event.title) == func.lower(ActivitySession.activity_name))
-        .where(
-            ActivitySession.student_id == student_id,
-            ActivityType.is_active == True,
-            func.lower(cast(ActivitySession.status, String)) == "approved",
-            *event_conditions,
-        )
-        .order_by(ActivitySession.id.desc())
-    )
-
-    rows = (await db.execute(stmt)).all()
-
-    total_points = 0
-
-    for session, activity_type in rows:
-        existing_points = (
-            getattr(session, "points_awarded", None)
-            or getattr(session, "awarded_points", None)
-            or getattr(session, "points", None)
-            or 0
+        stmt = (
+            select(ActivitySession, ActivityType)
+            .select_from(ActivitySession)
+            .join(ActivityType, ActivityType.id == ActivitySession.activity_type_id)
+            .join(Event, func.lower(Event.title) == func.lower(ActivitySession.activity_name))
+            .where(
+                ActivitySession.student_id == student_id,
+                ActivityType.is_active == True,
+                func.lower(cast(ActivitySession.status, String)) == "approved",
+                *event_conditions,
+            )
+            .order_by(ActivitySession.id.desc())
         )
 
-        points = int(existing_points or 0)
+        rows = (await db.execute(stmt)).all()
 
-        if points <= 0:
-            duration_hours = float(getattr(session, "duration_hours", 0) or 0)
-            hours_per_unit = float(getattr(activity_type, "hours_per_unit", 0) or 0)
-            points_per_unit = int(getattr(activity_type, "points_per_unit", 0) or 0)
-            max_points = int(getattr(activity_type, "max_points", 0) or 0)
+        total_points = 0
 
-            if hours_per_unit > 0 and points_per_unit > 0:
-                points = int((duration_hours / hours_per_unit) * points_per_unit)
+        for session, activity_type in rows:
+            existing_points = (
+                getattr(session, "points_awarded", None)
+                or getattr(session, "awarded_points", None)
+                or getattr(session, "points", None)
+                or 0
+            )
 
-                if max_points > 0:
-                    points = min(points, max_points)
+            points = int(existing_points or 0)
 
-        total_points += max(points, 0)
+            if points <= 0:
+                duration_hours = float(getattr(session, "duration_hours", 0) or 0)
+                hours_per_unit = float(getattr(activity_type, "hours_per_unit", 0) or 0)
+                points_per_unit = int(getattr(activity_type, "points_per_unit", 0) or 0)
+                max_points = int(getattr(activity_type, "max_points", 0) or 0)
 
-    return int(total_points)
+                if hours_per_unit > 0 and points_per_unit > 0:
+                    points = int((duration_hours / hours_per_unit) * points_per_unit)
+
+                    if max_points > 0:
+                        points = min(points, max_points)
+
+            total_points += max(points, 0)
+
+        return int(total_points)
+
+    except Exception as e:
+        print(f"[WARN] visible points calculation failed for student_id={student_id}: {e}")
+
+        # ✅ Safe fallback: do not crash /students/me
+        student = await db.get(Student, student_id)
+
+        if student:
+            return int(getattr(student, "total_points_earned", 0) or 0)
+
+        return 0
+
+
 student_router = APIRouter(prefix="/students", tags=["Student - Profile"])
 
 
@@ -602,17 +659,17 @@ async def get_student_me(
 ):
     visible_points = await _calculate_visible_student_points(db, current_student.id)
 
-    return {
-        "id": current_student.id,
-        "name": current_student.name,
-        "email": current_student.email,
-        "college": current_student.college,
-        "usn": current_student.usn,
-        "branch": current_student.branch,
-        "face_enrolled": current_student.face_enrolled,
-        "face_enrolled_at": current_student.face_enrolled_at,
-        "required_total_points": current_student.required_total_points,
+    required_points = int(getattr(current_student, "required_total_points", 0) or 0)
 
-        # ✅ dynamic visible points only, not old stored value
-        "total_points_earned": visible_points,
+    return {
+        "id": getattr(current_student, "id", None),
+        "name": getattr(current_student, "name", "") or "",
+        "email": getattr(current_student, "email", "") or "",
+        "college": getattr(current_student, "college", "") or "",
+        "usn": getattr(current_student, "usn", "") or "",
+        "branch": getattr(current_student, "branch", "") or "",
+        "face_enrolled": bool(getattr(current_student, "face_enrolled", False)),
+        "face_enrolled_at": getattr(current_student, "face_enrolled_at", None),
+        "required_total_points": required_points,
+        "total_points_earned": int(visible_points or 0),
     }
