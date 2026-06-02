@@ -205,7 +205,10 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
     res = await db.execute(
         select(ActivitySession, Event)
         .join(ActivityType, ActivityType.id == ActivitySession.activity_type_id)
-        .join(Event, func.lower(Event.title) == func.lower(ActivitySession.activity_name))
+        .join(
+    Event,
+    func.lower(func.trim(Event.title)) == func.lower(func.trim(ActivitySession.activity_name))
+)
         .where(
             ActivitySession.student_id == student_id,
             ActivityType.is_active == True,
