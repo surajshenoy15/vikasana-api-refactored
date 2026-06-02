@@ -316,29 +316,17 @@ async def student_events(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    # Do not use old cached list while debugging deleted/inactive events.
-    # This guarantees the mobile app gets fresh active events only.
-    conditions = []
+    cache_key = "student:events:list"
 
-    if hasattr(Event, "is_active"):
-        conditions.append(Event.is_active == True)
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return cached
 
-    if hasattr(Event, "is_deleted"):
-        conditions.append(Event.is_deleted == False)
+    events = await list_active_events(db)
+    result = [_event_out_dict(ev) for ev in events]
 
-    if hasattr(Event, "deleted_at"):
-        conditions.append(Event.deleted_at.is_(None))
-
-    stmt = (
-        select(Event)
-        .where(*conditions)
-        .order_by(Event.event_date.desc(), Event.id.desc())
-    )
-
-    res = await db.execute(stmt)
-    events = res.scalars().all()
-
-    return [_event_out_dict(ev) for ev in events]
+    await cache_set(cache_key, result, ttl=60)
+    return result
 
 
 @router.get("/student/events/{event_id}", response_model=EventOut)
@@ -347,23 +335,10 @@ async def student_event_detail(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    conditions = [Event.id == event_id]
-
-    if hasattr(Event, "is_active"):
-        conditions.append(Event.is_active == True)
-
-    if hasattr(Event, "is_deleted"):
-        conditions.append(Event.is_deleted == False)
-
-    if hasattr(Event, "deleted_at"):
-        conditions.append(Event.deleted_at.is_(None))
-
-    res = await db.execute(select(Event).where(*conditions))
+    res = await db.execute(select(Event).where(Event.id == event_id))
     ev = res.scalar_one_or_none()
-
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
-
     return _event_out_dict(ev)
 
 
