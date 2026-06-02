@@ -636,8 +636,7 @@ async def get_student_me(
     db: AsyncSession = Depends(get_db),
     current_student: Student = Depends(get_current_student),
 ):
-    visible_points = await _calculate_visible_student_points(db, current_student.id)
-
+    stored_points = int(getattr(current_student, "total_points_earned", 0) or 0)
     required_points = int(getattr(current_student, "required_total_points", 0) or 0)
 
     return {
@@ -650,5 +649,7 @@ async def get_student_me(
         "face_enrolled": bool(getattr(current_student, "face_enrolled", False)),
         "face_enrolled_at": getattr(current_student, "face_enrolled_at", None),
         "required_total_points": required_points,
-        "total_points_earned": int(visible_points or 0),
+
+        # ✅ official admin table points
+        "total_points_earned": stored_points,
     }
