@@ -188,16 +188,15 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
 
     Rules:
     - Show only sessions linked to active ActivityType.
-    - Hide old sessions if the related admin Event was deleted/deactivated.
+    - Show only sessions whose related Event is still present/active.
+    - Return actual Event.id, not activity_type_id, as event_id.
     - Keep proper points calculation from ActivitySession + ActivityType.
     """
 
-    # Local import avoids circular import issues
     from app.features.events.models import Event
 
     event_conditions = []
 
-    # Soft-delete support if your Event model has these fields
     if hasattr(Event, "is_deleted"):
         event_conditions.append(Event.is_deleted == False)
 
@@ -208,12 +207,11 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
         event_conditions.append(Event.is_active == True)
 
     # IMPORTANT:
-    # ActivitySession does not have event_id, so we match old session history
-    # with current active Event by title == activity_name.
-    # If admin hard-deleted the event, inner join removes it.
-    # If admin soft-deactivated it, event_conditions remove it.
+    # ActivitySession does not directly store event_id.
+    # So we match the present Event by title == ActivitySession.activity_name.
+    # We also select Event so frontend gets the real event_id and event details.
     res = await db.execute(
-        select(ActivitySession)
+        select(ActivitySession, Event)
         .join(ActivityType, ActivityType.id == ActivitySession.activity_type_id)
         .join(Event, func.lower(Event.title) == func.lower(ActivitySession.activity_name))
         .where(
@@ -228,10 +226,12 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
         )
     )
 
-    sessions = res.scalars().all()
+    rows = res.all()
 
-    if not sessions:
+    if not rows:
         return []
+
+    sessions = [row[0] for row in rows]
 
     activity_type_ids = list(
         {
@@ -258,10 +258,9 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
 
     result = []
 
-    for session in sessions:
+    for session, event in rows:
         at = activity_type_map.get(getattr(session, "activity_type_id", None))
 
-        # Extra safety: if activity type is deleted/inactive, skip this session
         if not at:
             continue
 
@@ -284,7 +283,6 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
 
         points_awarded = int(existing_points or 0)
 
-        # Calculate points only for approved sessions
         if points_awarded <= 0 and status_upper == "APPROVED":
             if hours_per_unit > 0 and points_per_unit > 0:
                 units = duration_hours / hours_per_unit
@@ -293,33 +291,46 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
                 if max_points > 0:
                     points_awarded = min(points_awarded, max_points)
 
-            # Fallback for short/testing approved events
             if points_awarded <= 0 and points_per_unit > 0:
                 points_awarded = points_per_unit
 
                 if max_points > 0:
                     points_awarded = min(points_awarded, max_points)
 
-        activity_name = (
-            getattr(session, "activity_name", None)
+        event_title = (
+            getattr(event, "title", None)
+            or getattr(session, "activity_name", None)
             or getattr(at, "name", None)
             or f"Activity #{getattr(session, 'activity_type_id', '')}"
         )
 
         event_date = None
-        if getattr(session, "submitted_at", None):
+        if getattr(event, "event_date", None):
+            event_date = event.event_date.isoformat()
+        elif getattr(session, "submitted_at", None):
             event_date = session.submitted_at.date().isoformat()
         elif getattr(session, "started_at", None):
             event_date = session.started_at.date().isoformat()
 
         event_start_time = None
-        if getattr(session, "started_at", None):
+        if getattr(event, "start_time", None):
+            event_start_time = str(event.start_time)
+        elif getattr(session, "started_at", None):
             event_start_time = session.started_at.time().isoformat(timespec="seconds")
 
         event_location = (
-            getattr(at, "venue_name", None)
+            getattr(event, "venue_name", None)
+            or getattr(event, "location", None)
+            or getattr(event, "maps_url", None)
+            or getattr(at, "venue_name", None)
             or getattr(at, "location", None)
             or getattr(at, "maps_url", None)
+        )
+
+        event_category = (
+            getattr(event, "category", None)
+            or getattr(at, "name", None)
+            or "Activity"
         )
 
         result.append(
@@ -328,18 +339,18 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
                 "session_id": session.id,
                 "submission_id": session.id,
 
-                # App history compatibility
-                "event_id": getattr(session, "activity_type_id", None),
+                # ✅ actual present event id
+                "event_id": getattr(event, "id", None),
+
                 "activity_type_id": getattr(session, "activity_type_id", None),
 
-                # Real name shown in app history
-                "event_title": activity_name,
-                "title": activity_name,
-                "activity_name": activity_name,
+                # ✅ real event details
+                "event_title": event_title,
+                "title": event_title,
+                "activity_name": event_title,
 
-                # Category/type shown in app
-                "event_category": getattr(at, "name", None) or "Activity",
-                "category": getattr(at, "name", None) or "Activity",
+                "event_category": event_category,
+                "category": event_category,
 
                 "event_date": event_date,
                 "event_start_time": event_start_time,
@@ -351,12 +362,11 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
                 "duration_hours": duration_hours,
                 "flag_reason": getattr(session, "flag_reason", None),
 
-                # Proper activity points
+                # ✅ points only from visible/present event sessions
                 "points_awarded": points_awarded,
                 "awarded_points": points_awarded,
                 "points": points_awarded,
 
-                # Optional debug/rule info
                 "hours_per_unit": hours_per_unit,
                 "points_per_unit": points_per_unit,
                 "max_points": max_points,
