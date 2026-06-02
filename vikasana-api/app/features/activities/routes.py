@@ -45,7 +45,7 @@ from app.core.activity_storage import upload_activity_image
 from app.features.activities.models import ActivityPhoto
 from app.features.activities.models import ActivitySession, ActivitySessionStatus
 from app.features.activities.models import ActivityType
-from app.features.events.models import Event
+from app.features.events.models import Event, EventSubmission
 
 # ✅ Face check models + services
 from app.features.activities.models import ActivityFaceCheck
@@ -518,10 +518,91 @@ async def my_sessions(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    # ✅ Return all student activity sessions.
-    # Do NOT filter by Event.title because ActivitySession.activity_name
-    # and Event.title may be different.
-    return await list_student_sessions(db, student.id)
+    """
+    Dashboard/history should show real event submissions,
+    not old ActivitySession test records.
+    """
+
+    conditions = [
+        EventSubmission.student_id == student.id,
+    ]
+
+    # ✅ hide deleted events if these columns exist
+    event_conditions = []
+
+    if hasattr(Event, "is_deleted"):
+        event_conditions.append(Event.is_deleted == False)
+
+    if hasattr(Event, "deleted_at"):
+        event_conditions.append(Event.deleted_at.is_(None))
+
+    stmt = (
+        select(EventSubmission, Event)
+        .join(Event, Event.id == EventSubmission.event_id)
+        .where(*conditions, *event_conditions)
+        .order_by(EventSubmission.id.desc())
+    )
+
+    rows = (await db.execute(stmt)).all()
+
+    result = []
+
+    for submission, event in rows:
+        raw_status = getattr(submission, "status", None)
+
+        if hasattr(raw_status, "value"):
+            status = raw_status.value
+        else:
+            status = str(raw_status or "").upper()
+
+        event_date = (
+            getattr(event, "event_date", None)
+            or getattr(event, "date", None)
+            or getattr(event, "start_date", None)
+        )
+
+        submitted_at = (
+            getattr(submission, "submitted_at", None)
+            or getattr(submission, "created_at", None)
+            or getattr(submission, "updated_at", None)
+        )
+
+        points = (
+            getattr(submission, "points_awarded", None)
+            or getattr(submission, "awarded_points", None)
+            or getattr(submission, "points", None)
+            or getattr(event, "points", None)
+            or 0
+        )
+
+        result.append({
+            "id": getattr(submission, "id", None),
+            "submission_id": getattr(submission, "id", None),
+            "session_id": getattr(submission, "id", None),
+
+            "event_id": getattr(event, "id", None),
+            "activity_name": getattr(event, "title", "") or f"Event #{getattr(event, 'id', '')}",
+            "title": getattr(event, "title", "") or f"Event #{getattr(event, 'id', '')}",
+            "event_title": getattr(event, "title", "") or f"Event #{getattr(event, 'id', '')}",
+
+            "category": getattr(event, "category", None),
+            "location": getattr(event, "location", None) or getattr(event, "venue_name", None),
+
+            "status": status,
+            "session_status": status,
+            "state": status,
+
+            "points": int(points or 0),
+            "points_awarded": int(points or 0),
+            "earned_points": int(points or 0),
+
+            "event_date": event_date,
+            "date": event_date,
+            "submitted_at": submitted_at,
+            "created_at": submitted_at,
+        })
+
+    return result
 
 @router.get("/sessions/{session_id}", response_model=SessionDetailOut)
 async def session_detail(
