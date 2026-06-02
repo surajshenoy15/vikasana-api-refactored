@@ -215,18 +215,26 @@ async def student_progress(
 # Shows real event title instead of hardcoded "Event Submission"
 # certificate = if any certificate exists for that submission_id
 # ─────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────
-# 4) RECENT SUBMISSIONS
-# Shows real event title instead of hardcoded "Event Submission"
-# certificate = if any certificate exists for that submission_id
-# ─────────────────────────────────────────────────────────────
-
 @router.get("/recent-submissions")
 async def recent_submissions(
     limit: int = Query(6, ge=1, le=20),
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
+    conditions = [
+        EventSubmission.submitted_at.isnot(None),
+    ]
+
+    # Optional soft-delete support if these columns exist in your Event model
+    if hasattr(Event, "is_deleted"):
+        conditions.append(Event.is_deleted == False)
+
+    if hasattr(Event, "deleted_at"):
+        conditions.append(Event.deleted_at.is_(None))
+
+    if hasattr(Event, "is_active"):
+        conditions.append(Event.is_active == True)
+
     stmt = (
         select(
             EventSubmission.id.label("submission_id"),
@@ -238,8 +246,13 @@ async def recent_submissions(
         )
         .select_from(EventSubmission)
         .join(Student, Student.id == EventSubmission.student_id)
-        .join(Event, Event.id == EventSubmission.event_id, isouter=True)
-        .where(EventSubmission.submitted_at.isnot(None))
+
+        # ✅ important: inner join hides hard-deleted events
+        .join(Event, Event.id == EventSubmission.event_id)
+
+        # ✅ hides soft-deleted/inactive events if your model has those columns
+        .where(*conditions)
+
         .order_by(EventSubmission.submitted_at.desc(), EventSubmission.id.desc())
         .limit(limit)
     )
@@ -279,7 +292,7 @@ async def recent_submissions(
                 "id": r.submission_id,
                 "student": r.student,
 
-                # ✅ actual event data
+                # actual event data
                 "event_id": r.event_id,
                 "event_title": event_title,
                 "title": event_title,
@@ -288,7 +301,7 @@ async def recent_submissions(
                 "submittedOn": r.submittedOn.isoformat() if r.submittedOn else None,
                 "status": str(getattr(r.status, "value", r.status)),
 
-                # ✅ certificate generated or not
+                # certificate generated or not
                 "certificate": cert is not None,
                 "certificate_id": cert.get("certificate_id") if cert else None,
             }
