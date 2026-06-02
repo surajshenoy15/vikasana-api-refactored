@@ -513,7 +513,7 @@ async def submit_activity(
     }
 
 
-@router.get("/sessions", response_model=list[SessionListItemOut])
+@router.get("/sessions", response_model=None)
 async def my_sessions(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
