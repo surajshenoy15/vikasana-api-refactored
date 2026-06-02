@@ -181,38 +181,32 @@ async def create_session(
 # ─────────────────────────────────────────────
 
 async def list_student_sessions(db: AsyncSession, student_id: int):
-    """
-    Student app history + dashboard count source.
-
-    Uses ActivitySession because the mobile app submissions/history are stored there.
-    Hides old/deleted events by joining active Event using:
-      Event.title == ActivitySession.activity_name
-    """
-
     from app.features.events.models import Event
-
+ 
     event_conditions = []
-
     if hasattr(Event, "is_deleted"):
         event_conditions.append(Event.is_deleted == False)
-
     if hasattr(Event, "deleted_at"):
         event_conditions.append(Event.deleted_at.is_(None))
-
     if hasattr(Event, "is_active"):
         event_conditions.append(Event.is_active == True)
-
+ 
+    # ✅ FIX: LEFT JOIN instead of INNER JOIN so sessions with no
+    #         matching event are not silently dropped.
     res = await db.execute(
         select(ActivitySession, Event)
         .join(ActivityType, ActivityType.id == ActivitySession.activity_type_id)
-        .join(
-    Event,
-    func.lower(func.trim(Event.title)) == func.lower(func.trim(ActivitySession.activity_name))
-)
+        .outerjoin(                                       # <── was .join()
+            Event,
+            func.lower(func.trim(Event.title))
+            == func.lower(func.trim(ActivitySession.activity_name)),
+        )
         .where(
             ActivitySession.student_id == student_id,
             ActivityType.is_active == True,
-            *event_conditions,
+            # ✅ FIX: apply event filters only when event IS present (outer join)
+            # We cannot put event_conditions here directly because that turns the
+            # outer join into an inner join.  Filter after fetch instead (see below).
         )
         .order_by(
             ActivitySession.submitted_at.desc().nullslast(),
@@ -220,22 +214,35 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
             ActivitySession.id.desc(),
         )
     )
-
+ 
     rows = res.all()
-
     if not rows:
         return []
-
-    activity_type_ids = list(
-        {
-            int(session.activity_type_id)
-            for session, event in rows
-            if getattr(session, "activity_type_id", None) is not None
-        }
-    )
-
+ 
+    # ── Post-fetch: filter out rows where the matched event is soft-deleted ──
+    # (safe because unmatched rows have event=None, which passes all checks)
+    filtered_rows = []
+    for session, event in rows:
+        if event is not None:
+            if hasattr(Event, "is_deleted") and getattr(event, "is_deleted", False):
+                continue
+            if hasattr(Event, "deleted_at") and getattr(event, "deleted_at", None) is not None:
+                continue
+            if hasattr(Event, "is_active") and not getattr(event, "is_active", True):
+                continue
+        filtered_rows.append((session, event))
+ 
+    rows = filtered_rows
+    if not rows:
+        return []
+ 
+    activity_type_ids = list({
+        int(s.activity_type_id)
+        for s, _ in rows
+        if getattr(s, "activity_type_id", None) is not None
+    })
+ 
     activity_type_map = {}
-
     if activity_type_ids:
         at_res = await db.execute(
             select(ActivityType).where(
@@ -243,60 +250,52 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
                 ActivityType.is_active == True,
             )
         )
-
-        activity_type_map = {
-            at.id: at
-            for at in at_res.scalars().all()
-        }
-
+        activity_type_map = {at.id: at for at in at_res.scalars().all()}
+ 
     result = []
-
     for session, event in rows:
         at = activity_type_map.get(getattr(session, "activity_type_id", None))
-
         if not at:
             continue
-
-        raw_status = getattr(session, "status", None)
+ 
+        raw_status   = getattr(session, "status", None)
         status_value = raw_status.value if hasattr(raw_status, "value") else str(raw_status or "")
         status_upper = status_value.upper()
-
-        duration_hours = float(getattr(session, "duration_hours", 0) or 0)
-
-        hours_per_unit = float(getattr(at, "hours_per_unit", 0) or 0)
+ 
+        duration_hours  = float(getattr(session, "duration_hours", 0) or 0)
+        hours_per_unit  = float(getattr(at, "hours_per_unit", 0) or 0)
         points_per_unit = int(getattr(at, "points_per_unit", 0) or 0)
-        max_points = int(getattr(at, "max_points", 0) or 0)
-
+        max_points      = int(getattr(at, "max_points", 0) or 0)
+ 
         existing_points = (
             getattr(session, "points_awarded", None)
             or getattr(session, "awarded_points", None)
             or getattr(session, "points", None)
             or 0
         )
-
         points_awarded = int(existing_points or 0)
-
+ 
         if points_awarded <= 0 and status_upper == "APPROVED":
             if hours_per_unit > 0 and points_per_unit > 0:
                 units = duration_hours / hours_per_unit
                 points_awarded = int(units * points_per_unit)
-
                 if max_points > 0:
                     points_awarded = min(points_awarded, max_points)
-
             if points_awarded <= 0 and points_per_unit > 0:
                 points_awarded = points_per_unit
-
                 if max_points > 0:
                     points_awarded = min(points_awarded, max_points)
-
+ 
+        # ── Enrichment: prefer live event data, fall back to session fields ──
         event_title = (
             getattr(event, "title", None)
             or getattr(session, "activity_name", None)
             or getattr(at, "name", None)
             or f"Activity #{getattr(session, 'activity_type_id', '')}"
         )
-
+ 
+        event_id_val = getattr(event, "id", None)
+ 
         event_date = None
         if getattr(event, "event_date", None):
             event_date = event.event_date.isoformat()
@@ -304,67 +303,61 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
             event_date = session.submitted_at.date().isoformat()
         elif getattr(session, "started_at", None):
             event_date = session.started_at.date().isoformat()
-
+ 
         event_start_time = None
         if getattr(event, "start_time", None):
             event_start_time = str(event.start_time)
         elif getattr(session, "started_at", None):
             event_start_time = session.started_at.time().isoformat(timespec="seconds")
-
+ 
         event_location = (
             getattr(event, "venue_name", None)
             or getattr(event, "location", None)
-            or getattr(event, "maps_url", None)
             or getattr(at, "venue_name", None)
             or getattr(at, "location", None)
-            or getattr(at, "maps_url", None)
         )
-
+ 
         event_category = (
             getattr(event, "category", None)
             or getattr(at, "name", None)
             or "Activity"
         )
-
-        result.append(
-            {
-                "id": session.id,
-                "session_id": session.id,
-                "submission_id": session.id,
-
-                # actual event id for frontend enrichment
-                "event_id": getattr(event, "id", None),
-
-                "activity_type_id": getattr(session, "activity_type_id", None),
-
-                "event_title": event_title,
-                "title": event_title,
-                "activity_name": event_title,
-
-                "event_category": event_category,
-                "category": event_category,
-
-                "event_date": event_date,
-                "event_start_time": event_start_time,
-                "event_location": event_location,
-
-                "status": status_value,
-                "started_at": session.started_at.isoformat() if session.started_at else None,
-                "submitted_at": session.submitted_at.isoformat() if session.submitted_at else None,
-                "duration_hours": duration_hours,
-                "flag_reason": getattr(session, "flag_reason", None),
-
-                "points_awarded": points_awarded,
-                "awarded_points": points_awarded,
-                "points": points_awarded,
-
-                "hours_per_unit": hours_per_unit,
-                "points_per_unit": points_per_unit,
-                "max_points": max_points,
-            }
-        )
-
+ 
+        result.append({
+            "id":             session.id,
+            "session_id":     session.id,
+            "submission_id":  session.id,
+            "event_id":       event_id_val,
+            "activity_type_id": getattr(session, "activity_type_id", None),
+ 
+            "event_title":    event_title,
+            "title":          event_title,
+            "activity_name":  event_title,
+ 
+            "event_category": event_category,
+            "category":       event_category,
+ 
+            "event_date":       event_date,
+            "event_start_time": event_start_time,
+            "event_location":   event_location,
+ 
+            "status":           status_value,
+            "started_at":       session.started_at.isoformat()  if session.started_at  else None,
+            "submitted_at":     session.submitted_at.isoformat() if session.submitted_at else None,
+            "duration_hours":   duration_hours,
+            "flag_reason":      getattr(session, "flag_reason", None),
+ 
+            "points_awarded":   points_awarded,
+            "awarded_points":   points_awarded,
+            "points":           points_awarded,
+ 
+            "hours_per_unit":   hours_per_unit,
+            "points_per_unit":  points_per_unit,
+            "max_points":       max_points,
+        })
+ 
     return result
+
 # ─────────────────────────────────────────────
 # Add Photo (STRICT 500m geofence enforcement)
 # ─────────────────────────────────────────────
