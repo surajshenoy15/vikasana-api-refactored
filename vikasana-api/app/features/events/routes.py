@@ -1,6 +1,6 @@
 # app/routes/events.py
 from __future__ import annotations
-
+import os
 import math
 from datetime import datetime, date as date_type, time as time_type
 from typing import List
