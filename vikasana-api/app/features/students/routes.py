@@ -582,58 +582,38 @@ def _event_visible_conditions():
 
 async def _calculate_visible_student_points(db: AsyncSession, student_id: int) -> int:
     """
-    Recalculate student points from visible/non-deleted events only.
+    Calculate student points from approved activity sessions.
 
-    Why:
-    - Student.total_points_earned is stored and may include old deleted events.
-    - App dashboard reads /students/me.
-    - So /students/me must calculate fresh visible points.
+    Fix:
+    - Avoids strict Event.title == ActivitySession.activity_name join.
+    - That join can fail if event title and activity name are slightly different.
+    - So points were becoming 0 even though approved sessions exist.
     """
 
     try:
-        event_conditions = _event_visible_conditions()
-
         stmt = (
-            select(ActivitySession, ActivityType)
-            .select_from(ActivitySession)
-            .join(ActivityType, ActivityType.id == ActivitySession.activity_type_id)
-            .join(Event, func.lower(Event.title) == func.lower(ActivitySession.activity_name))
+            select(ActivitySession)
             .where(
                 ActivitySession.student_id == student_id,
-                ActivityType.is_active == True,
                 func.lower(cast(ActivitySession.status, String)) == "approved",
-                *event_conditions,
             )
             .order_by(ActivitySession.id.desc())
         )
 
-        rows = (await db.execute(stmt)).all()
+        sessions = (await db.execute(stmt)).scalars().all()
 
         total_points = 0
 
-        for session, activity_type in rows:
-            existing_points = (
+        for session in sessions:
+            points = (
                 getattr(session, "points_awarded", None)
                 or getattr(session, "awarded_points", None)
                 or getattr(session, "points", None)
+                or getattr(session, "total_points", None)
                 or 0
             )
 
-            points = int(existing_points or 0)
-
-            if points <= 0:
-                duration_hours = float(getattr(session, "duration_hours", 0) or 0)
-                hours_per_unit = float(getattr(activity_type, "hours_per_unit", 0) or 0)
-                points_per_unit = int(getattr(activity_type, "points_per_unit", 0) or 0)
-                max_points = int(getattr(activity_type, "max_points", 0) or 0)
-
-                if hours_per_unit > 0 and points_per_unit > 0:
-                    points = int((duration_hours / hours_per_unit) * points_per_unit)
-
-                    if max_points > 0:
-                        points = min(points, max_points)
-
-            total_points += max(points, 0)
+            total_points += max(int(points or 0), 0)
 
         return int(total_points)
 
@@ -647,7 +627,6 @@ async def _calculate_visible_student_points(db: AsyncSession, student_id: int) -
             return int(getattr(student, "total_points_earned", 0) or 0)
 
         return 0
-
 
 student_router = APIRouter(prefix="/students", tags=["Student - Profile"])
 
