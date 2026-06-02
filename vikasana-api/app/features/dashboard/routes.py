@@ -6,8 +6,8 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_admin
 
 from app.features.students.models import Student
-from app.features.faculty.models import Faculty  # ✅ adjust if your actual model name differs
-from app.features.events.models import EventSubmission
+from app.features.faculty.models import Faculty
+from app.features.events.models import Event, EventSubmission
 from app.features.certificates.models import Certificate
 from app.features.activities.models import ActivityType
 
@@ -17,6 +17,7 @@ router = APIRouter(prefix="/admin/dashboard", tags=["Admin - Dashboard"])
 # ─────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────
+
 def _color_for_activity(name: str) -> str:
     n = (name or "").lower()
     if "nss" in n or "volunteer" in n:
@@ -29,91 +30,108 @@ def _color_for_activity(name: str) -> str:
 
 
 def _is_approved_status_col(col):
-    # handles "approved"/"APPROVED"/etc
     return func.lower(col) == "approved"
+
+
+def _status_to_str(status) -> str:
+    if status is None:
+        return "—"
+
+    value = getattr(status, "value", status)
+    return str(value)
+
+
+def _safe_event_title(title, event_id=None) -> str:
+    t = (title or "").strip()
+    if t:
+        return t
+    if event_id:
+        return f"Event #{event_id}"
+    return "Unknown Event"
 
 
 # ─────────────────────────────────────────────────────────────
 # 1) STATS
 # ─────────────────────────────────────────────────────────────
+
 @router.get("/stats")
 async def dashboard_stats(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    total_students = (await db.execute(select(func.count(Student.id)))).scalar() or 0
+    total_students = (
+        await db.execute(select(func.count(Student.id)))
+    ).scalar() or 0
 
-    # ✅ If your Student doesn't have is_active, remove these and set active_students = total_students
     try:
         active_students = (
-            await db.execute(select(func.count(Student.id)).where(Student.is_active == True))
+            await db.execute(
+                select(func.count(Student.id)).where(Student.is_active == True)
+            )
         ).scalar() or 0
     except Exception:
         active_students = total_students
 
-    total_faculty = (await db.execute(select(func.count(Faculty.id)))).scalar() or 0
+    total_faculty = (
+        await db.execute(select(func.count(Faculty.id)))
+    ).scalar() or 0
 
-    # ✅ If your Faculty doesn't have is_active, adjust accordingly
     try:
         pending_faculty = (
-            await db.execute(select(func.count(Faculty.id)).where(Faculty.is_active == False))
+            await db.execute(
+                select(func.count(Faculty.id)).where(Faculty.is_active == False)
+            )
         ).scalar() or 0
     except Exception:
         pending_faculty = 0
 
-    total_submissions = (await db.execute(select(func.count(EventSubmission.id)))).scalar() or 0
+    total_submissions = (
+        await db.execute(select(func.count(EventSubmission.id)))
+    ).scalar() or 0
+
     approved_submissions = (
         await db.execute(
-            select(func.count(EventSubmission.id)).where(_is_approved_status_col(EventSubmission.status))
+            select(func.count(EventSubmission.id)).where(
+                _is_approved_status_col(EventSubmission.status)
+            )
         )
     ).scalar() or 0
 
-    total_certificates = (await db.execute(select(func.count(Certificate.id)))).scalar() or 0
+    total_certificates = (
+        await db.execute(select(func.count(Certificate.id)))
+    ).scalar() or 0
 
     return {
         "totalStudents": int(total_students),
         "activeStudents": int(active_students),
         "totalFaculty": int(total_faculty),
         "pendingFaculty": int(pending_faculty),
-        "totalActivities": int(total_submissions),          # ✅ mapped to "submissions" for dashboard
-        "approvedActivities": int(approved_submissions),    # ✅ approved submissions
+        "totalActivities": int(total_submissions),
+        "approvedActivities": int(approved_submissions),
         "totalCertificates": int(total_certificates),
         "asOf": None,
     }
 
 
 # ─────────────────────────────────────────────────────────────
-# 2) CATEGORY PROGRESS (ActivityType-wise)
-# submitted = how many EventSubmissions exist for that ActivityType
-# approved  = how many EventSubmissions approved for that ActivityType
+# 2) CATEGORY PROGRESS
 # ─────────────────────────────────────────────────────────────
+
 @router.get("/category-progress")
 async def category_progress(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    # We can derive category from certificates (since cert has activity_type_id),
-    # BUT submissions may exist before certificate issuance.
-    # Best: Use EventSubmission -> EventActivityType mapping?
-    #
-    # Since your schema shows certificates have activity_type_id + submission_id,
-    # and unique constraint says one certificate per activity_type per submission,
-    # we assume activity_type_id is determined at certificate issuance.
-    #
-    # For dashboard "Submission Progress by Category", we want:
-    # - submitted per activity_type: count of certificates issued entries? (or count of "attempts")
-    # If you want it purely based on EventSubmission, your EventSubmission must have activity_type_id.
-    #
-    # ✅ So we do it based on CERTIFICATES because that's the only reliable link to activity_type.
-    # submitted = count(certificates rows) per activity type
-    # approved  = count(certificates rows where submission.status approved (certificate implies approved usually)
-    # But to keep consistent, we join submission and count approved by submission.status.
-
     stmt = (
         select(
             ActivityType.name.label("label"),
             func.count(Certificate.id).label("submitted"),
-            func.sum(case((_is_approved_status_col(EventSubmission.status), 1), else_=0)).label("approved"),
+            func.sum(
+                case(
+                    (_is_approved_status_col(EventSubmission.status), 1),
+                    else_=0,
+                )
+            ).label("approved"),
         )
         .select_from(Certificate)
         .join(ActivityType, ActivityType.id == Certificate.activity_type_id)
@@ -140,6 +158,7 @@ async def category_progress(
 # activities = count of EventSubmissions by student
 # certificates = count of Certificates by student
 # ─────────────────────────────────────────────────────────────
+
 @router.get("/student-progress")
 async def student_progress(
     limit: int = Query(12, ge=1, le=50),
@@ -163,14 +182,22 @@ async def student_progress(
     student_ids = [r.id for r in act_rows]
 
     cert_map = {}
+
     if student_ids:
         cert_stmt = (
-            select(Certificate.student_id, func.count(Certificate.id))
+            select(
+                Certificate.student_id,
+                func.count(Certificate.id).label("certificate_count"),
+            )
             .where(Certificate.student_id.in_(student_ids))
             .group_by(Certificate.student_id)
         )
+
         cert_rows = (await db.execute(cert_stmt)).all()
-        cert_map = {sid: int(cnt or 0) for sid, cnt in cert_rows}
+        cert_map = {
+            sid: int(cnt or 0)
+            for sid, cnt in cert_rows
+        }
 
     return [
         {
@@ -184,9 +211,11 @@ async def student_progress(
 
 
 # ─────────────────────────────────────────────────────────────
-# 4) RECENT SUBMISSIONS (EventSubmission-based)
+# 4) RECENT SUBMISSIONS
+# Shows real event title instead of hardcoded "Event Submission"
 # certificate = if any certificate exists for that submission_id
 # ─────────────────────────────────────────────────────────────
+
 @router.get("/recent-submissions")
 async def recent_submissions(
     limit: int = Query(6, ge=1, le=20),
@@ -196,36 +225,69 @@ async def recent_submissions(
     stmt = (
         select(
             EventSubmission.id.label("submission_id"),
+            EventSubmission.event_id.label("event_id"),
             Student.name.label("student"),
+            Event.title.label("event_title"),
             EventSubmission.submitted_at.label("submittedOn"),
             EventSubmission.status.label("status"),
         )
         .select_from(EventSubmission)
         .join(Student, Student.id == EventSubmission.student_id)
+        .join(Event, Event.id == EventSubmission.event_id, isouter=True)
         .where(EventSubmission.submitted_at.isnot(None))
         .order_by(EventSubmission.submitted_at.desc(), EventSubmission.id.desc())
         .limit(limit)
     )
 
     rows = (await db.execute(stmt)).all()
-    ids = [r.submission_id for r in rows]
+    submission_ids = [r.submission_id for r in rows]
 
-    cert_set = set()
-    if ids:
+    cert_map = {}
+
+    if submission_ids:
         cert_q = await db.execute(
-            select(Certificate.submission_id).where(Certificate.submission_id.in_(ids))
+            select(
+                Certificate.submission_id.label("submission_id"),
+                Certificate.id.label("certificate_id"),
+                Certificate.certificate_number.label("certificate_number"),
+            ).where(Certificate.submission_id.in_(submission_ids))
         )
-        cert_set = set([x[0] for x in cert_q.all()])
 
-    return [
-        {
-            "id": r.submission_id,
-            "student": r.student,
-            "title": "Event Submission",   # ✅ if you have a title field in submission, replace it
-            "category": "Event",           # ✅ if you want event name, join Event table
-            "submittedOn": r.submittedOn.isoformat() if r.submittedOn else None,
-            "status": str(r.status),
-            "certificate": (r.submission_id in cert_set),
+        cert_map = {
+            r.submission_id: {
+                "certificate_id": r.certificate_id,
+                "certificate_number": r.certificate_number,
+            }
+            for r in cert_q.all()
         }
-        for r in rows
-    ]
+
+    result = []
+
+    for r in rows:
+        event_title = _safe_event_title(r.event_title, r.event_id)
+        cert = cert_map.get(r.submission_id)
+
+        result.append(
+            {
+                "id": r.submission_id,
+                "student": r.student,
+
+                # Important fields for dashboard frontend
+                "event_id": r.event_id,
+                "event_title": event_title,
+
+                # Keep title also as actual event title for old frontend compatibility
+                "title": event_title,
+
+                "category": "Event",
+                "submittedOn": r.submittedOn.isoformat() if r.submittedOn else None,
+                "status": _status_to_str(r.status),
+
+                # Certificate generated or not
+                "certificate": cert is not None,
+                "certificate_id": cert.get("certificate_id") if cert else None,
+                "certificate_number": cert.get("certificate_number") if cert else None,
+            }
+        )
+
+    return result
