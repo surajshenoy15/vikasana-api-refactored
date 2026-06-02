@@ -182,15 +182,11 @@ async def create_session(
 
 async def list_student_sessions(db: AsyncSession, student_id: int):
     """
-    Returns enriched activity history for the logged-in student.
-    Used by:
-      GET /api/student/activity/sessions
+    Student app history + dashboard count source.
 
-    Rules:
-    - Show only sessions linked to active ActivityType.
-    - Show only sessions whose related Event is still present/active.
-    - Return actual Event.id, not activity_type_id, as event_id.
-    - Keep proper points calculation from ActivitySession + ActivityType.
+    Uses ActivitySession because the mobile app submissions/history are stored there.
+    Hides old/deleted events by joining active Event using:
+      Event.title == ActivitySession.activity_name
     """
 
     from app.features.events.models import Event
@@ -206,10 +202,6 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
     if hasattr(Event, "is_active"):
         event_conditions.append(Event.is_active == True)
 
-    # IMPORTANT:
-    # ActivitySession does not directly store event_id.
-    # So we match the present Event by title == ActivitySession.activity_name.
-    # We also select Event so frontend gets the real event_id and event details.
     res = await db.execute(
         select(ActivitySession, Event)
         .join(ActivityType, ActivityType.id == ActivitySession.activity_type_id)
@@ -231,13 +223,11 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
     if not rows:
         return []
 
-    sessions = [row[0] for row in rows]
-
     activity_type_ids = list(
         {
-            int(s.activity_type_id)
-            for s in sessions
-            if getattr(s, "activity_type_id", None) is not None
+            int(session.activity_type_id)
+            for session, event in rows
+            if getattr(session, "activity_type_id", None) is not None
         }
     )
 
@@ -339,12 +329,11 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
                 "session_id": session.id,
                 "submission_id": session.id,
 
-                # ✅ actual present event id
+                # actual event id for frontend enrichment
                 "event_id": getattr(event, "id", None),
 
                 "activity_type_id": getattr(session, "activity_type_id", None),
 
-                # ✅ real event details
                 "event_title": event_title,
                 "title": event_title,
                 "activity_name": event_title,
@@ -362,7 +351,6 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
                 "duration_hours": duration_hours,
                 "flag_reason": getattr(session, "flag_reason", None),
 
-                # ✅ points only from visible/present event sessions
                 "points_awarded": points_awarded,
                 "awarded_points": points_awarded,
                 "points": points_awarded,
