@@ -13,6 +13,7 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_student, get_current_admin
 from app.core.redis import cache_get, cache_set
 from app.core.activity_storage import upload_activity_image
+from fastapi.responses import JSONResponse
 
 from app.features.events.models import Event, EventSubmission, EventSubmissionPhoto
 from app.features.events.schemas.events import (
@@ -580,13 +581,119 @@ async def submit_event(
 # ---------------------- ADMIN REVIEW ----------------------
 # =========================================================
 
-@router.get("/admin/events/{event_id}/submissions", response_model=list[AdminSubmissionOut])
+@router.get("/admin/events/{event_id}/submissions")
 async def admin_list_event_submissions(
     event_id: int,
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    return await list_event_submissions(db, event_id)
+    rows = await list_event_submissions(db, event_id)
+
+    safe_rows = []
+
+    for s in rows:
+        item = s.model_dump() if hasattr(s, "model_dump") else dict(s)
+
+        # ✅ Do not expose photo URLs in table/list response
+        item.pop("photos", None)
+        item.pop("photo_urls", None)
+        item.pop("images", None)
+        item.pop("image_url", None)
+        item.pop("photo_url", None)
+        item.pop("signed_url", None)
+
+        # ✅ Optional: keep only photo count if present
+        if "photo_count" not in item:
+            item["photo_count"] = 0
+
+        safe_rows.append(item)
+
+    response = JSONResponse(safe_rows)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+@router.get("/admin/submissions/{submission_id}/photos")
+async def admin_get_submission_photos(
+    submission_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    sub_res = await db.execute(
+        select(EventSubmission).where(EventSubmission.id == submission_id)
+    )
+    submission = sub_res.scalar_one_or_none()
+
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    photo_res = await db.execute(
+        select(EventSubmissionPhoto)
+        .where(EventSubmissionPhoto.submission_id == submission_id)
+        .order_by(EventSubmissionPhoto.seq_no.asc())
+    )
+
+    photos = photo_res.scalars().all()
+
+    result = []
+
+    for photo in photos:
+        raw_url = getattr(photo, "image_url", "") or ""
+        object_key = raw_url.strip().split("?")[0].lstrip("/")
+
+        # Remove possible bucket prefix from stored URL/key
+        for prefix in [
+            "activity-uploads/",
+            "activity-uploads-652197206453-ap-south-1-an/",
+            "minio/activity-uploads/",
+            "minio/activity-uploads-652197206453-ap-south-1-an/",
+        ]:
+            if object_key.startswith(prefix):
+                object_key = object_key[len(prefix):]
+
+        if object_key.startswith("http://") or object_key.startswith("https://"):
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(object_key)
+                path = parsed.path.lstrip("/")
+
+                for prefix in [
+                    "activity-uploads/",
+                    "activity-uploads-652197206453-ap-south-1-an/",
+                    "minio/activity-uploads/",
+                    "minio/activity-uploads-652197206453-ap-south-1-an/",
+                ]:
+                    if path.startswith(prefix):
+                        path = path[len(prefix):]
+                        break
+
+                object_key = path
+            except Exception:
+                pass
+
+        signed_url = get_presigned_url(
+            bucket="activity-uploads",
+            object_name=object_key,
+            expiry_seconds=60,
+            public=True,
+        )
+
+        result.append({
+            "id": getattr(photo, "id", None),
+            "seq_no": getattr(photo, "seq_no", None),
+            "url": signed_url,
+        })
+
+    response = JSONResponse({
+        "submission_id": submission_id,
+        "expires_in_seconds": 60,
+        "photos": result,
+    })
+
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    response.headers["Pragma"] = "no-cache"
+
+    return response
 
 
 @router.post("/admin/submissions/{submission_id}/approve", response_model=AdminSubmissionOut)
