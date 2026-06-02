@@ -6,7 +6,7 @@ from datetime import datetime, date as date_type, time as time_type
 from typing import List
 
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -316,16 +316,43 @@ async def student_events(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    cache_key = "student:events:list"
-
-    cached = await cache_get(cache_key)
-    if cached is not None:
-        return cached
-
+    # ✅ Do not cache this route because registered_count must be live
     events = await list_active_events(db)
-    result = [_event_out_dict(ev) for ev in events]
 
-    await cache_set(cache_key, result, ttl=60)
+    event_ids = [ev.id for ev in events]
+
+    registered_count_map: dict[int, int] = {}
+
+    if event_ids:
+        count_rows = await db.execute(
+            select(
+                EventSubmission.event_id,
+                func.count(func.distinct(EventSubmission.student_id)).label("registered_count"),
+            )
+            .where(EventSubmission.event_id.in_(event_ids))
+            .group_by(EventSubmission.event_id)
+        )
+
+        registered_count_map = {
+            int(event_id): int(count or 0)
+            for event_id, count in count_rows.all()
+        }
+
+    result = []
+
+    for ev in events:
+        item = _event_out_dict(ev)
+
+        item["registered_count"] = registered_count_map.get(ev.id, 0)
+
+        if "max_participants" not in item or item.get("max_participants") is None:
+            item["max_participants"] = getattr(ev, "max_participants", None) or 100
+
+        if "capacity" not in item or item.get("capacity") is None:
+            item["capacity"] = item.get("max_participants") or 100
+
+        result.append(item)
+
     return result
 
 
