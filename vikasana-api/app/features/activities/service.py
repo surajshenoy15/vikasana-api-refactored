@@ -182,17 +182,156 @@ async def create_session(
 
 async def list_student_sessions(db: AsyncSession, student_id: int):
     """
-    Returns all sessions for the logged-in student.
+    Returns enriched activity history for the logged-in student.
     Used by:
       GET /api/student/activity/sessions
+
+    This returns app-friendly fields:
+    - real activity/event name
+    - category/activity type name
+    - proper points earned
+    - date/time/location
     """
+
     res = await db.execute(
         select(ActivitySession)
         .where(ActivitySession.student_id == student_id)
-        .order_by(ActivitySession.started_at.desc())
+        .order_by(
+            ActivitySession.submitted_at.desc().nullslast(),
+            ActivitySession.started_at.desc(),
+            ActivitySession.id.desc(),
+        )
     )
-    return res.scalars().all()
 
+    sessions = res.scalars().all()
+
+    if not sessions:
+        return []
+
+    activity_type_ids = list(
+        {
+            int(s.activity_type_id)
+            for s in sessions
+            if getattr(s, "activity_type_id", None) is not None
+        }
+    )
+
+    activity_type_map = {}
+
+    if activity_type_ids:
+        at_res = await db.execute(
+            select(ActivityType).where(ActivityType.id.in_(activity_type_ids))
+        )
+
+        activity_type_map = {
+            at.id: at
+            for at in at_res.scalars().all()
+        }
+
+    result = []
+
+    for session in sessions:
+        at = activity_type_map.get(getattr(session, "activity_type_id", None))
+
+        raw_status = getattr(session, "status", None)
+        status_value = raw_status.value if hasattr(raw_status, "value") else str(raw_status or "")
+
+        duration_hours = float(getattr(session, "duration_hours", 0) or 0)
+
+        hours_per_unit = float(getattr(at, "hours_per_unit", 0) or 0) if at else 0
+        points_per_unit = int(getattr(at, "points_per_unit", 0) or 0) if at else 0
+        max_points = int(getattr(at, "max_points", 0) or 0) if at else 0
+
+        existing_points = (
+            getattr(session, "points_awarded", None)
+            or getattr(session, "awarded_points", None)
+            or getattr(session, "points", None)
+            or 0
+        )
+
+        points_awarded = int(existing_points or 0)
+
+        # If points are not stored in ActivitySession, calculate from ActivityType rule.
+        # Only approved sessions should show earned points.
+        if points_awarded <= 0 and status_value.upper() == "APPROVED":
+            if hours_per_unit > 0 and points_per_unit > 0:
+                units = duration_hours / hours_per_unit
+                points_awarded = int(units * points_per_unit)
+
+                if max_points > 0:
+                    points_awarded = min(points_awarded, max_points)
+
+            # fallback: if duration is too small but approved, give one unit points
+            # this avoids showing 0 for approved sessions like short testing events
+            if points_awarded <= 0 and points_per_unit > 0:
+                points_awarded = points_per_unit
+                if max_points > 0:
+                    points_awarded = min(points_awarded, max_points)
+
+        activity_name = (
+            getattr(session, "activity_name", None)
+            or getattr(at, "name", None)
+            or f"Activity #{getattr(session, 'activity_type_id', '')}"
+        )
+
+        event_date = None
+        if getattr(session, "submitted_at", None):
+            event_date = session.submitted_at.date().isoformat()
+        elif getattr(session, "started_at", None):
+            event_date = session.started_at.date().isoformat()
+
+        event_start_time = None
+        if getattr(session, "started_at", None):
+            event_start_time = session.started_at.time().isoformat(timespec="seconds")
+
+        event_location = (
+            getattr(at, "venue_name", None)
+            or getattr(at, "location", None)
+            or getattr(at, "maps_url", None)
+        ) if at else None
+
+        result.append(
+            {
+                "id": session.id,
+                "session_id": session.id,
+                "submission_id": session.id,
+
+                # App history compatibility
+                "event_id": getattr(session, "activity_type_id", None),
+                "activity_type_id": getattr(session, "activity_type_id", None),
+
+                # Real name shown in app history
+                "event_title": activity_name,
+                "title": activity_name,
+                "activity_name": activity_name,
+
+                # Category/type shown in app
+                "event_category": getattr(at, "name", None) if at else "Activity",
+                "category": getattr(at, "name", None) if at else "Activity",
+
+                "event_date": event_date,
+                "event_start_time": event_start_time,
+                "event_location": event_location,
+
+                "status": status_value,
+                "started_at": session.started_at.isoformat() if session.started_at else None,
+                "submitted_at": session.submitted_at.isoformat() if session.submitted_at else None,
+                "duration_hours": duration_hours,
+                "flag_reason": getattr(session, "flag_reason", None),
+
+                # Proper activity points
+                "points_awarded": points_awarded,
+                "awarded_points": points_awarded,
+                "points": points_awarded,
+
+                # Optional rule info for frontend/debug
+                "hours_per_unit": hours_per_unit,
+                "points_per_unit": points_per_unit,
+                "max_points": max_points,
+            }
+        )
+
+    return result
 
 # ─────────────────────────────────────────────
 # Add Photo (STRICT 500m geofence enforcement)
