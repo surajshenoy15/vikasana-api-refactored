@@ -678,44 +678,48 @@ async def admin_get_submission_photos(
 
     photos = photo_res.scalars().all()
 
+    # ✅ Use real bucket from env, not hardcoded old bucket
+    activity_bucket = (
+        os.getenv("AWS_S3_BUCKET_ACTIVITIES")
+        or os.getenv("MINIO_BUCKET_ACTIVITIES")
+        or "activity-uploads-652197206453-ap-south-1-an"
+    )
+
     result = []
 
     for photo in photos:
         raw_url = getattr(photo, "image_url", "") or ""
         object_key = raw_url.strip().split("?")[0].lstrip("/")
 
-        # Remove possible bucket prefix from stored URL/key
-        for prefix in [
+        # If DB stored full URL, extract path
+        if object_key.startswith("http://") or object_key.startswith("https://"):
+            try:
+                from urllib.parse import urlparse
+
+                parsed = urlparse(object_key)
+                object_key = parsed.path.lstrip("/")
+            except Exception:
+                pass
+
+        # ✅ Remove possible bucket/proxy prefixes
+        prefixes_to_remove = [
+            f"{activity_bucket}/",
             "activity-uploads/",
             "activity-uploads-652197206453-ap-south-1-an/",
             "minio/activity-uploads/",
             "minio/activity-uploads-652197206453-ap-south-1-an/",
-        ]:
+        ]
+
+        for prefix in prefixes_to_remove:
             if object_key.startswith(prefix):
                 object_key = object_key[len(prefix):]
+                break
 
-        if object_key.startswith("http://") or object_key.startswith("https://"):
-            try:
-                from urllib.parse import urlparse
-                parsed = urlparse(object_key)
-                path = parsed.path.lstrip("/")
-
-                for prefix in [
-                    "activity-uploads/",
-                    "activity-uploads-652197206453-ap-south-1-an/",
-                    "minio/activity-uploads/",
-                    "minio/activity-uploads-652197206453-ap-south-1-an/",
-                ]:
-                    if path.startswith(prefix):
-                        path = path[len(prefix):]
-                        break
-
-                object_key = path
-            except Exception:
-                pass
+        if not object_key:
+            continue
 
         signed_url = get_presigned_url(
-            bucket="activity-uploads",
+            bucket=activity_bucket,
             object_name=object_key,
             expiry_seconds=60,
             public=True,
@@ -737,7 +741,6 @@ async def admin_get_submission_photos(
     response.headers["Pragma"] = "no-cache"
 
     return response
-
 
 @router.post("/admin/submissions/{submission_id}/approve", response_model=AdminSubmissionOut)
 async def approve_event_submission_api(
