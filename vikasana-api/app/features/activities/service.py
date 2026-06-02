@@ -194,14 +194,18 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
     """
 
     res = await db.execute(
-        select(ActivitySession)
-        .where(ActivitySession.student_id == student_id)
-        .order_by(
-            ActivitySession.submitted_at.desc().nullslast(),
-            ActivitySession.started_at.desc(),
-            ActivitySession.id.desc(),
-        )
+    select(ActivitySession)
+    .join(ActivityType, ActivityType.id == ActivitySession.activity_type_id)
+    .where(
+        ActivitySession.student_id == student_id,
+        ActivityType.is_active == True,
     )
+    .order_by(
+        ActivitySession.submitted_at.desc().nullslast(),
+        ActivitySession.started_at.desc(),
+        ActivitySession.id.desc(),
+    )
+)
 
     sessions = res.scalars().all()
 

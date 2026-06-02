@@ -50,8 +50,33 @@ def _safe_event_title(title, event_id=None) -> str:
     return "Unknown Event"
 
 
+def _event_visible_conditions():
+    """
+    Supports both hard-delete and soft-delete setups.
+
+    Hard delete:
+      inner join with Event automatically hides deleted events.
+
+    Soft delete:
+      if Event has is_deleted / deleted_at / is_active, filter them too.
+    """
+    conditions = []
+
+    if hasattr(Event, "is_deleted"):
+        conditions.append(Event.is_deleted == False)
+
+    if hasattr(Event, "deleted_at"):
+        conditions.append(Event.deleted_at.is_(None))
+
+    if hasattr(Event, "is_active"):
+        conditions.append(Event.is_active == True)
+
+    return conditions
+
+
 # ─────────────────────────────────────────────────────────────
 # 1) STATS
+# Counts only submissions linked to existing / active events
 # ─────────────────────────────────────────────────────────────
 
 @router.get("/stats")
@@ -59,6 +84,8 @@ async def dashboard_stats(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
+    visible_event_conditions = _event_visible_conditions()
+
     total_students = (
         await db.execute(select(func.count(Student.id)))
     ).scalar() or 0
@@ -86,19 +113,34 @@ async def dashboard_stats(
         pending_faculty = 0
 
     total_submissions = (
-        await db.execute(select(func.count(EventSubmission.id)))
+        await db.execute(
+            select(func.count(EventSubmission.id))
+            .select_from(EventSubmission)
+            .join(Event, Event.id == EventSubmission.event_id)
+            .where(*visible_event_conditions)
+        )
     ).scalar() or 0
 
     approved_submissions = (
         await db.execute(
-            select(func.count(EventSubmission.id)).where(
-                _is_approved_status_col(EventSubmission.status)
+            select(func.count(EventSubmission.id))
+            .select_from(EventSubmission)
+            .join(Event, Event.id == EventSubmission.event_id)
+            .where(
+                *visible_event_conditions,
+                _is_approved_status_col(EventSubmission.status),
             )
         )
     ).scalar() or 0
 
     total_certificates = (
-        await db.execute(select(func.count(Certificate.id)))
+        await db.execute(
+            select(func.count(Certificate.id))
+            .select_from(Certificate)
+            .join(EventSubmission, EventSubmission.id == Certificate.submission_id)
+            .join(Event, Event.id == EventSubmission.event_id)
+            .where(*visible_event_conditions)
+        )
     ).scalar() or 0
 
     return {
@@ -115,6 +157,7 @@ async def dashboard_stats(
 
 # ─────────────────────────────────────────────────────────────
 # 2) CATEGORY PROGRESS
+# Counts only certificates/submissions linked to existing / active events
 # ─────────────────────────────────────────────────────────────
 
 @router.get("/category-progress")
@@ -122,6 +165,8 @@ async def category_progress(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
+    visible_event_conditions = _event_visible_conditions()
+
     stmt = (
         select(
             ActivityType.name.label("label"),
@@ -136,6 +181,8 @@ async def category_progress(
         .select_from(Certificate)
         .join(ActivityType, ActivityType.id == Certificate.activity_type_id)
         .join(EventSubmission, EventSubmission.id == Certificate.submission_id)
+        .join(Event, Event.id == EventSubmission.event_id)
+        .where(*visible_event_conditions)
         .group_by(ActivityType.name)
         .order_by(ActivityType.name.asc())
     )
@@ -155,8 +202,7 @@ async def category_progress(
 
 # ─────────────────────────────────────────────────────────────
 # 3) STUDENT PROGRESS
-# activities = count of EventSubmissions by student
-# certificates = count of Certificates by student
+# Counts only submissions/certificates linked to existing / active events
 # ─────────────────────────────────────────────────────────────
 
 @router.get("/student-progress")
@@ -165,6 +211,8 @@ async def student_progress(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
+    visible_event_conditions = _event_visible_conditions()
+
     act_stmt = (
         select(
             Student.id.label("id"),
@@ -173,6 +221,8 @@ async def student_progress(
         )
         .select_from(Student)
         .join(EventSubmission, EventSubmission.student_id == Student.id, isouter=True)
+        .join(Event, Event.id == EventSubmission.event_id, isouter=True)
+        .where(*visible_event_conditions)
         .group_by(Student.id, Student.name)
         .order_by(func.count(EventSubmission.id).desc())
         .limit(limit)
@@ -189,7 +239,13 @@ async def student_progress(
                 Certificate.student_id,
                 func.count(Certificate.id).label("certificate_count"),
             )
-            .where(Certificate.student_id.in_(student_ids))
+            .select_from(Certificate)
+            .join(EventSubmission, EventSubmission.id == Certificate.submission_id)
+            .join(Event, Event.id == EventSubmission.event_id)
+            .where(
+                Certificate.student_id.in_(student_ids),
+                *visible_event_conditions,
+            )
             .group_by(Certificate.student_id)
         )
 
@@ -212,28 +268,16 @@ async def student_progress(
 
 # ─────────────────────────────────────────────────────────────
 # 4) RECENT SUBMISSIONS
-# Shows real event title instead of hardcoded "Event Submission"
-# certificate = if any certificate exists for that submission_id
+# Shows only submissions linked to existing / active events
 # ─────────────────────────────────────────────────────────────
+
 @router.get("/recent-submissions")
 async def recent_submissions(
     limit: int = Query(6, ge=1, le=20),
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    conditions = [
-        EventSubmission.submitted_at.isnot(None),
-    ]
-
-    # Optional soft-delete support if these columns exist in your Event model
-    if hasattr(Event, "is_deleted"):
-        conditions.append(Event.is_deleted == False)
-
-    if hasattr(Event, "deleted_at"):
-        conditions.append(Event.deleted_at.is_(None))
-
-    if hasattr(Event, "is_active"):
-        conditions.append(Event.is_active == True)
+    visible_event_conditions = _event_visible_conditions()
 
     stmt = (
         select(
@@ -246,13 +290,11 @@ async def recent_submissions(
         )
         .select_from(EventSubmission)
         .join(Student, Student.id == EventSubmission.student_id)
-
-        # ✅ important: inner join hides hard-deleted events
         .join(Event, Event.id == EventSubmission.event_id)
-
-        # ✅ hides soft-deleted/inactive events if your model has those columns
-        .where(*conditions)
-
+        .where(
+            EventSubmission.submitted_at.isnot(None),
+            *visible_event_conditions,
+        )
         .order_by(EventSubmission.submitted_at.desc(), EventSubmission.id.desc())
         .limit(limit)
     )
@@ -280,11 +322,7 @@ async def recent_submissions(
     result = []
 
     for r in rows:
-        event_title = (r.event_title or "").strip()
-
-        if not event_title:
-            event_title = f"Event #{r.event_id}" if r.event_id else "Unknown Event"
-
+        event_title = _safe_event_title(r.event_title, r.event_id)
         cert = cert_map.get(r.submission_id)
 
         result.append(
@@ -292,16 +330,14 @@ async def recent_submissions(
                 "id": r.submission_id,
                 "student": r.student,
 
-                # actual event data
                 "event_id": r.event_id,
                 "event_title": event_title,
                 "title": event_title,
 
                 "category": "Event",
                 "submittedOn": r.submittedOn.isoformat() if r.submittedOn else None,
-                "status": str(getattr(r.status, "value", r.status)),
+                "status": _status_to_str(r.status),
 
-                # certificate generated or not
                 "certificate": cert is not None,
                 "certificate_id": cert.get("certificate_id") if cert else None,
             }
