@@ -534,7 +534,8 @@ async def create_or_update_activity_session_from_submission(
 
     for at_id in activity_type_ids:
         q = await db.execute(
-            select(ActivitySession).where(
+            select(ActivitySession)
+            .where(
                 ActivitySession.student_id == submission.student_id,
                 ActivitySession.activity_type_id == at_id,
                 ActivitySession.started_at <= end_utc,
@@ -544,8 +545,12 @@ async def create_or_update_activity_session_from_submission(
                     end_utc,
                 ) >= start_utc,
             )
+            .order_by(ActivitySession.id.desc())
         )
-        session = q.scalar_one_or_none()
+
+        # ✅ Use first result instead of scalar_one_or_none()
+        # because duplicate sessions may already exist.
+        session = q.scalars().first()
 
         if session:
             session.status = target_status
@@ -555,7 +560,9 @@ async def create_or_update_activity_session_from_submission(
                 ActivitySessionStatus.APPROVED,
             ]:
                 if session.submitted_at is None:
-                    session.submitted_at = getattr(submission, "submitted_at", None) or now_utc
+                    session.submitted_at = (
+                        getattr(submission, "submitted_at", None) or now_utc
+                    )
 
             # ✅ Update session time using photo window
             session.started_at = start_utc
