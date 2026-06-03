@@ -715,3 +715,101 @@ async def send_student_otp_email(to_email: str, to_name: str, otp: str) -> None:
         "htmlContent": _wrap(body, from_email),
     }
     await _send(api_key, payload)
+
+
+    # ══════════════════════════════════════════════════════════════
+#  Admin — MFA OTP Email
+# ══════════════════════════════════════════════════════════════
+
+async def send_admin_mfa_otp_email(to_email: str, to_name: str, otp: str) -> None:
+    api_key, from_email, from_name = _brevo_cfg()
+    subject = "Admin MFA Code — LoRaa Connect"
+
+    body = f"""
+          <!-- Greeting -->
+          <tr>
+            <td style="padding:40px 40px 0;">
+              <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#2E6BE6;
+                        text-transform:uppercase;letter-spacing:1.5px;">
+                Admin Security Verification
+              </p>
+              <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#0A2463;
+                         line-height:1.3;">
+                Your MFA Verification Code
+              </h1>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:16px 40px 0;">
+              <div style="width:40px;height:2px;background:#2E6BE6;"></div>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:24px 40px 0;">
+              <p style="margin:0;font-size:15px;color:#475569;line-height:1.75;">
+                Hello <strong style="color:#0A2463;">{to_name}</strong>,
+                use the verification code below to complete your admin login.
+              </p>
+            </td>
+          </tr>
+
+          <!-- OTP -->
+          <tr>
+            <td style="padding:32px 40px 0;text-align:center;">
+              <p style="margin:0 0 16px;font-size:11px;font-weight:600;color:#94A3B8;
+                        text-transform:uppercase;letter-spacing:1.2px;">
+                One-Time Admin Code
+              </p>
+              {_otp_digits(otp)}
+            </td>
+          </tr>
+
+          <!-- Expiry -->
+          <tr>
+            <td style="padding:20px 40px 0;text-align:center;">
+              <table cellpadding="0" cellspacing="0" style="margin:0 auto;">
+                <tr>
+                  <td style="background:#FEF3C7;border:1px solid #FDE68A;
+                             border-radius:100px;padding:8px 20px;">
+                    <p style="margin:0;font-size:12px;color:#92400E;font-weight:600;">
+                      &#x23F1;&nbsp; This code expires in <strong>5 minutes</strong>
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Security note -->
+          <tr>
+            <td style="padding:24px 40px 36px;">
+              <table width="100%" cellpadding="0" cellspacing="0"
+                     style="background:#EEF3FC;border:1px solid #E4EAF4;
+                            border-radius:6px;border-left:3px solid #2E6BE6;">
+                <tr>
+                  <td style="padding:14px 18px;">
+                    <p style="margin:0;font-size:13px;color:#64748B;line-height:1.65;">
+                      <strong>Security reminder:</strong> LoRaa Connect will never ask you
+                      to share this code. If you did not initiate this admin login,
+                      change your password immediately and contact support.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+              <p style="margin:14px 0 0;font-size:12px;color:#94A3B8;">
+                Admin login for <strong>{to_email}</strong>
+              </p>
+            </td>
+          </tr>
+    """
+
+    payload = {
+        "sender": {"name": from_name, "email": from_email},
+        "to": [{"email": to_email, "name": to_name}],
+        "subject": subject,
+        "htmlContent": _wrap(body, from_email),
+    }
+
+    await _send(api_key, payload)

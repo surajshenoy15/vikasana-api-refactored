@@ -12,6 +12,7 @@ from app.core.security import create_access_token, verify_password
 from app.features.auth.models import Admin, AdminMFAOtp
 from app.features.faculty.models import Faculty
 from app.features.college_access.service import ensure_college_is_active
+from app.core.email_service import send_admin_mfa_otp_email
 
 from app.features.auth.schemas.auth import (
     AdminInfo,
@@ -33,14 +34,12 @@ def _hash_otp(otp: str) -> str:
     return hashlib.sha256(otp.encode("utf-8")).hexdigest()
 
 
-async def _send_admin_mfa_email(email: str, otp: str):
-    """
-    TEMPORARY for testing.
-
-    For now, OTP will be printed in backend Docker logs.
-    Later we will replace this with your real email sending function.
-    """
-    print(f"ADMIN MFA OTP for {email}: {otp}")
+async def _send_admin_mfa_email(email: str, name: str, otp: str):
+    await send_admin_mfa_otp_email(
+        to_email=email,
+        to_name=name or "Admin",
+        otp=otp,
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -102,7 +101,7 @@ async def login(payload: LoginRequest, db: AsyncSession) -> AdminMFAStartRespons
     db.add(otp_row)
     await db.commit()
 
-    await _send_admin_mfa_email(admin.email, otp)
+    await _send_admin_mfa_email(admin.email, admin.name, otp)
 
     return AdminMFAStartResponse(
         mfa_required=True,
