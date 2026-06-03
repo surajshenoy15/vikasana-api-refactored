@@ -31,7 +31,7 @@ from app.features.events.schemas.events import (
 )
 from app.features.events.schemas.upload import ThumbnailUploadOut
 from app.features.certificates.schemas.certificate import StudentCertificateOut
-
+from app.features.activities.models import ActivityType
 from app.features.events.service import (
     create_event,
     update_event,
@@ -319,13 +319,11 @@ async def student_events(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    # ✅ Do not cache this route because registered_count must be live
     events = await list_active_events(db)
-
     event_ids = [ev.id for ev in events]
 
+    # registered counts (unchanged)
     registered_count_map: dict[int, int] = {}
-
     if event_ids:
         count_rows = await db.execute(
             select(
@@ -335,25 +333,79 @@ async def student_events(
             .where(EventSubmission.event_id.in_(event_ids))
             .group_by(EventSubmission.event_id)
         )
+        registered_count_map = {int(eid): int(c or 0) for eid, c in count_rows.all()}
 
-        registered_count_map = {
-            int(event_id): int(count or 0)
-            for event_id, count in count_rows.all()
+    # ── Load ActivityType caps/rates for AUTO points ──
+    at_map: dict[int, ActivityType] = {}
+    all_at_ids: set[int] = set()
+    items: list[dict] = []
+    for ev in events:
+        it = _event_out_dict(ev)
+        for r in it.get("scoring_rules", []):
+            if r.get("activity_type_id") is not None:
+                all_at_ids.add(int(r["activity_type_id"]))
+        items.append(it)
+
+    if all_at_ids:
+        at_rows = await db.execute(select(ActivityType).where(ActivityType.id.in_(all_at_ids)))
+        at_map = {int(a.id): a for a in at_rows.scalars().all()}
+
+    def _points_for(item: dict) -> dict:
+        rules = item.get("scoring_rules", []) or []
+        manual_total = 0
+        auto_max_total = 0
+        has_manual = False
+        has_auto = False
+        min_hours = 0.0
+
+        for r in rules:
+            mode = str(r.get("score_mode") or "AUTO").upper()
+            mh = float(r.get("min_required_hours") or 0)
+            min_hours = max(min_hours, mh)
+            if mode == "MANUAL":
+                has_manual = True
+                manual_total += int(r.get("manual_points") or 0)
+            else:
+                has_auto = True
+                at = at_map.get(int(r["activity_type_id"])) if r.get("activity_type_id") else None
+                mp = int(getattr(at, "max_points", 0) or 0) if at else 0
+                auto_max_total += mp
+
+        if has_manual and has_auto:
+            mode = "mixed"
+        elif has_manual:
+            mode = "fixed"
+        elif has_auto:
+            mode = "auto"
+        else:
+            mode = "none"
+
+        if mode == "fixed":
+            display = f"+{manual_total} pts"
+        elif mode == "auto":
+            display = f"Up to {auto_max_total} pts" if auto_max_total > 0 else "Based on hours"
+        elif mode == "mixed":
+            display = f"+{manual_total} pts"
+            display += f" · up to +{auto_max_total}" if auto_max_total > 0 else " + hours-based"
+        else:
+            display = "—"
+
+        return {
+            "points_mode": mode,                                  # fixed | auto | mixed | none
+            "manual_points_total": manual_total,
+            "auto_max_total": auto_max_total,
+            "max_points": manual_total + auto_max_total,          # best-case achievable
+            "min_required_hours": min_hours,
+            "points_display": display,                            # ready-to-render string
+            "points": manual_total if mode == "fixed" else 0,     # legacy field
         }
 
     result = []
-
-    for ev in events:
-        item = _event_out_dict(ev)
-
+    for ev, item in zip(events, items):
         item["registered_count"] = registered_count_map.get(ev.id, 0)
-
-        if "max_participants" not in item or item.get("max_participants") is None:
-            item["max_participants"] = getattr(ev, "max_participants", None) or 100
-
-        if "capacity" not in item or item.get("capacity") is None:
-            item["capacity"] = item.get("max_participants") or 100
-
+        item["max_participants"] = getattr(ev, "max_participants", None) or 100
+        item["capacity"] = item.get("max_participants") or 100
+        item.update(_points_for(item))
         result.append(item)
 
     return result

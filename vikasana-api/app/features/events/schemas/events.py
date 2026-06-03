@@ -247,10 +247,19 @@ class EventOut(BaseModel):
     activity_type_ids: List[int] = Field(default_factory=list)
     scoring_rules: List[EventScoringRuleOut] = Field(default_factory=list)
 
-    # ✅ Add these for mobile event card live count
+    # live count
     registered_count: int = 0
     capacity: Optional[int] = None
     max_participants: Optional[int] = None
+
+    # ✅ NEW: points display (computed in /student/events)
+    points_mode: Optional[str] = None           # fixed | auto | mixed | none
+    manual_points_total: Optional[int] = None
+    auto_max_total: Optional[int] = None
+    max_points: Optional[int] = None
+    min_required_hours: Optional[float] = None
+    points_display: Optional[str] = None
+    points: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -2021,11 +2021,12 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # =========================================================
 async def list_active_events(db: AsyncSession) -> list[Event]:
     """
-    Returns Event ORM objects so routes can safely pass each item into
-    _event_out_dict(ev), which expects ev.id / ev.title / etc.
+    Returns Event ORM objects with activity_types eager-loaded
+    so _event_out_dict(ev) can build scoring_rules (points) safely.
     """
     q = await db.execute(
         select(Event)
+        .options(selectinload(Event.activity_types))   # ✅ loads mapping rows for points
         .where(Event.event_date.isnot(None))
         .order_by(
             Event.event_date.desc(),
