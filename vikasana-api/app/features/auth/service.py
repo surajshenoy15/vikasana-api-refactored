@@ -1,13 +1,15 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import hashlib
+import secrets
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.security import create_access_token, verify_password
 
-from app.features.auth.models import Admin
+from app.features.auth.models import Admin, AdminMFAOtp
 from app.features.faculty.models import Faculty
 from app.features.college_access.service import ensure_college_is_active
 
@@ -18,18 +20,50 @@ from app.features.auth.schemas.auth import (
     LoginResponse,
     FacultyLoginResponse,
     MeResponse,
+    AdminMFAStartResponse,
+    AdminMFAVerifyRequest,
 )
 
 
-async def login(payload: LoginRequest, db: AsyncSession) -> LoginResponse:
+# ─────────────────────────────────────────────────────────────
+# Admin MFA helpers
+# ─────────────────────────────────────────────────────────────
+
+def _hash_otp(otp: str) -> str:
+    return hashlib.sha256(otp.encode("utf-8")).hexdigest()
+
+
+async def _send_admin_mfa_email(email: str, otp: str):
     """
-    Admin login
+    TEMPORARY for testing.
+
+    For now, OTP will be printed in backend Docker logs.
+    Later we will replace this with your real email sending function.
+    """
+    print(f"ADMIN MFA OTP for {email}: {otp}")
+
+
+# ─────────────────────────────────────────────────────────────
+# Admin login step 1: email + password
+# ─────────────────────────────────────────────────────────────
+
+async def login(payload: LoginRequest, db: AsyncSession) -> AdminMFAStartResponse:
+    """
+    Admin login step 1:
+    - Verify admin email + password
+    - Generate 6-digit OTP
+    - Store OTP hash in DB
+    - Return mfa_token
+    - Do NOT return access token yet
     """
     result = await db.execute(select(Admin).where(Admin.email == payload.email))
     admin = result.scalar_one_or_none()
 
     DUMMY_HASH = "$2b$12$dummyhashXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-    password_ok = verify_password(payload.password, admin.password_hash if admin else DUMMY_HASH)
+    password_ok = verify_password(
+        payload.password,
+        admin.password_hash if admin else DUMMY_HASH,
+    )
 
     if not admin or not password_ok:
         raise HTTPException(
@@ -43,9 +77,124 @@ async def login(payload: LoginRequest, db: AsyncSession) -> LoginResponse:
             detail="Account is deactivated. Contact support.",
         )
 
-    admin.last_login_at = datetime.now(timezone.utc)
+    # Invalidate previous unused OTP sessions for this admin
+    await db.execute(
+        update(AdminMFAOtp)
+        .where(
+            AdminMFAOtp.admin_id == admin.id,
+            AdminMFAOtp.used == False,
+        )
+        .values(used=True)
+    )
+
+    otp = f"{secrets.randbelow(1000000):06d}"
+    mfa_token = secrets.token_urlsafe(32)
+
+    otp_row = AdminMFAOtp(
+        admin_id=admin.id,
+        otp_hash=_hash_otp(otp),
+        mfa_token=mfa_token,
+        attempts=0,
+        used=False,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    db.add(otp_row)
+    await db.commit()
+
+    await _send_admin_mfa_email(admin.email, otp)
+
+    return AdminMFAStartResponse(
+        mfa_required=True,
+        mfa_token=mfa_token,
+        message="OTP sent to admin email",
+        expires_in=300,
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# Admin login step 2: verify OTP
+# ─────────────────────────────────────────────────────────────
+
+async def verify_admin_mfa(
+    payload: AdminMFAVerifyRequest,
+    db: AsyncSession,
+) -> LoginResponse:
+    """
+    Admin login step 2:
+    - Verify mfa_token + OTP
+    - Mark OTP as used
+    - Update last_login_at
+    - Return real access token
+    """
+    result = await db.execute(
+        select(AdminMFAOtp)
+        .where(AdminMFAOtp.mfa_token == payload.mfa_token)
+        .order_by(AdminMFAOtp.id.desc())
+    )
+    otp_row = result.scalar_one_or_none()
+
+    if not otp_row:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired OTP session",
+        )
+
+    if otp_row.used:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="OTP already used. Please login again.",
+        )
+
+    now = datetime.now(timezone.utc)
+
+    if otp_row.expires_at < now:
+        otp_row.used = True
+        db.add(otp_row)
+        await db.commit()
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="OTP expired. Please login again.",
+        )
+
+    if otp_row.attempts >= 5:
+        otp_row.used = True
+        db.add(otp_row)
+        await db.commit()
+
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many OTP attempts. Please login again.",
+        )
+
+    submitted_otp = str(payload.otp).strip()
+
+    if _hash_otp(submitted_otp) != otp_row.otp_hash:
+        otp_row.attempts += 1
+        db.add(otp_row)
+        await db.commit()
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid OTP",
+        )
+
+    result = await db.execute(select(Admin).where(Admin.id == otp_row.admin_id))
+    admin = result.scalar_one_or_none()
+
+    if not admin or not admin.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin account not available",
+        )
+
+    otp_row.used = True
+    admin.last_login_at = now
+
+    db.add(otp_row)
     db.add(admin)
-    await db.flush()
+    await db.commit()
 
     token = create_access_token(admin.id, admin.email)
 
@@ -60,12 +209,16 @@ async def login(payload: LoginRequest, db: AsyncSession) -> LoginResponse:
     )
 
 
+# ─────────────────────────────────────────────────────────────
+# Faculty login unchanged
+# ─────────────────────────────────────────────────────────────
+
 async def faculty_login(payload: LoginRequest, db: AsyncSession) -> FacultyLoginResponse:
     """
-    Faculty login (email + password)
-    - Uses same timing-safe pattern as admin login
-    - Requires faculty.is_active = True AND password_hash exists
-    - Blocks login if the whole college is deactivated
+    Faculty login email + password.
+
+    MFA is only added for admin login.
+    Faculty login remains unchanged.
     """
     result = await db.execute(select(Faculty).where(Faculty.email == payload.email))
     faculty = result.scalar_one_or_none()
@@ -94,7 +247,7 @@ async def faculty_login(payload: LoginRequest, db: AsyncSession) -> FacultyLogin
             detail="Password not set. Please activate your account.",
         )
 
-    # ✅ SaaS college-wide access control
+    # SaaS college-wide access control
     await ensure_college_is_active(db, faculty.college)
 
     token = create_access_token(faculty.id, faculty.email)
@@ -112,8 +265,15 @@ async def faculty_login(payload: LoginRequest, db: AsyncSession) -> FacultyLogin
     )
 
 
+# ─────────────────────────────────────────────────────────────
+# Current admin profile
+# ─────────────────────────────────────────────────────────────
+
 async def get_me(admin: Admin) -> MeResponse:
-    """Returns current admin profile. No DB call needed — admin already loaded by dependency."""
+    """
+    Returns current admin profile.
+    No DB call needed because admin is already loaded by dependency.
+    """
     return MeResponse(
         id=admin.id,
         name=admin.name,

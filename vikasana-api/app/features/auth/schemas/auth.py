@@ -36,6 +36,24 @@ class LoginResponse(BaseModel):
     expires_in: int  # seconds — frontend uses this to know when token expires
     admin: AdminInfo
 
+class AdminMFAStartResponse(BaseModel):
+    """
+    Response after admin email + password is correct.
+    Access token is NOT returned yet.
+    Frontend should show OTP screen.
+    """
+    mfa_required: bool = True
+    mfa_token: str
+    message: str = "OTP sent to admin email"
+    expires_in: int = 300
+
+
+class AdminMFAVerifyRequest(BaseModel):
+    """
+    Request body for verifying admin OTP.
+    """
+    mfa_token: str
+    otp: str = Field(..., min_length=6, max_length=6)
 
 class MeResponse(BaseModel):
     """Full admin profile — returned by GET /auth/me"""
