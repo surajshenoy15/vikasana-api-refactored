@@ -371,7 +371,11 @@ async def copy_event_photos_to_activity_session(
             already.image_url = p.image_url
             already.lat = getattr(p, "lat", None)
             already.lng = getattr(p, "lng", None)
-            already.captured_at = getattr(submission, "submitted_at", None) or datetime.now(timezone.utc)
+            already.captured_at = (
+                getattr(p, "captured_at", None)
+                or getattr(submission, "submitted_at", None)
+                or datetime.now(timezone.utc)
+            )
             already.distance_m = getattr(p, "distance_m", None)
             already.is_in_geofence = is_in_geofence_val
         else:
@@ -383,7 +387,11 @@ async def copy_event_photos_to_activity_session(
                     image_url=p.image_url,
                     lat=getattr(p, "lat", None),
                     lng=getattr(p, "lng", None),
-                    captured_at=getattr(submission, "submitted_at", None) or datetime.now(timezone.utc),
+                    captured_at=(
+                        getattr(p, "captured_at", None)
+                        or getattr(submission, "submitted_at", None)
+                        or datetime.now(timezone.utc)
+                    ),
                     sha256=None,
                     distance_m=getattr(p, "distance_m", None),
                     is_in_geofence=is_in_geofence_val,
@@ -448,6 +456,62 @@ async def create_face_check_for_activity_session(
 
     await db.commit()
 
+async def _photo_window_for_submission(
+    db: AsyncSession,
+    submission_id: int,
+    event: Event,
+) -> tuple[datetime, datetime, float]:
+    """
+    Calculates verified hours using:
+    first photo captured_at -> last photo captured_at
+
+    Also clamps the time inside event start/end window.
+    """
+
+    event_start_utc, event_end_utc = _event_window_utc(event)
+
+    q = await db.execute(
+        select(EventSubmissionPhoto)
+        .where(EventSubmissionPhoto.submission_id == submission_id)
+        .order_by(EventSubmissionPhoto.seq_no.asc())
+    )
+    photos = q.scalars().all()
+
+    times: list[datetime] = []
+
+    for p in photos:
+        dt = getattr(p, "captured_at", None)
+
+        # fallback for old photos before captured_at column existed
+        if dt is None:
+            dt = getattr(p, "created_at", None)
+
+        if dt is None:
+            continue
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        times.append(dt.astimezone(timezone.utc))
+
+    # Need at least 2 photos to calculate duration
+    if len(times) < 2:
+        return event_start_utc, event_start_utc, 0.0
+
+    first_photo_utc = min(times)
+    last_photo_utc = max(times)
+
+    # safety: don't allow photo time outside actual event window
+    verified_start = max(first_photo_utc, event_start_utc)
+    verified_end = min(last_photo_utc, event_end_utc)
+
+    verified_hours = max(
+        0.0,
+        (verified_end - verified_start).total_seconds() / 3600.0,
+    )
+
+    return verified_start, verified_end, verified_hours
+
 async def create_or_update_activity_session_from_submission(
     db: AsyncSession,
     submission: EventSubmission,
@@ -458,7 +522,13 @@ async def create_or_update_activity_session_from_submission(
     if not activity_type_ids:
         return []
 
-    start_utc, end_utc = _event_window_utc(event)
+    # ✅ Now using first photo timestamp → last photo timestamp
+    start_utc, end_utc, verified_hours = await _photo_window_for_submission(
+        db=db,
+        submission_id=submission.id,
+        event=event,
+    )
+
     now_utc = datetime.now(timezone.utc)
     sessions = []
 
@@ -468,7 +538,11 @@ async def create_or_update_activity_session_from_submission(
                 ActivitySession.student_id == submission.student_id,
                 ActivitySession.activity_type_id == at_id,
                 ActivitySession.started_at <= end_utc,
-                func.coalesce(ActivitySession.submitted_at, ActivitySession.expires_at, end_utc) >= start_utc,
+                func.coalesce(
+                    ActivitySession.expires_at,
+                    ActivitySession.submitted_at,
+                    end_utc,
+                ) >= start_utc,
             )
         )
         session = q.scalar_one_or_none()
@@ -476,14 +550,18 @@ async def create_or_update_activity_session_from_submission(
         if session:
             session.status = target_status
 
-            if target_status in [ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.APPROVED]:
+            if target_status in [
+                ActivitySessionStatus.SUBMITTED,
+                ActivitySessionStatus.APPROVED,
+            ]:
                 if session.submitted_at is None:
                     session.submitted_at = getattr(submission, "submitted_at", None) or now_utc
 
-            if session.duration_hours is None:
-                session.duration_hours = max(
-                    0.0, (end_utc - start_utc).total_seconds() / 3600.0
-                )
+            # ✅ Update session time using photo window
+            session.started_at = start_utc
+            session.expires_at = end_utc
+            session.duration_hours = verified_hours
+
         else:
             session = ActivitySession(
                 student_id=submission.student_id,
@@ -491,17 +569,25 @@ async def create_or_update_activity_session_from_submission(
                 activity_name=getattr(event, "title", "Event Activity"),
                 description=getattr(submission, "description", None),
                 session_code=secrets.token_hex(8),
+
+                # ✅ First photo time
                 started_at=start_utc,
+
+                # ✅ Last photo time
                 expires_at=end_utc,
+
                 submitted_at=(
                     getattr(submission, "submitted_at", None) or now_utc
-                    if target_status in [ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.APPROVED]
+                    if target_status in [
+                        ActivitySessionStatus.SUBMITTED,
+                        ActivitySessionStatus.APPROVED,
+                    ]
                     else None
                 ),
                 status=target_status,
-                duration_hours=max(
-                    0.0, (end_utc - start_utc).total_seconds() / 3600.0
-                ),
+
+                # ✅ Duration from first photo to last photo
+                duration_hours=verified_hours,
             )
             db.add(session)
             await db.flush()
@@ -510,7 +596,6 @@ async def create_or_update_activity_session_from_submission(
 
     await db.commit()
     return sessions
-
 
 # =========================================================
 # ---------------------- CERT HELPERS ----------------------
@@ -619,8 +704,8 @@ async def _calculate_submission_points(
         at_id = int(mapping.activity_type_id)
 
         session_end = func.coalesce(
-            ActivitySession.submitted_at,
             ActivitySession.expires_at,
+            ActivitySession.submitted_at,
             end_utc,
         )
 
@@ -788,8 +873,8 @@ async def _eligible_students_from_sessions(
         end_utc = start_utc + timedelta(hours=6)
 
     session_end = func.coalesce(
-        ActivitySession.submitted_at,
         ActivitySession.expires_at,
+        ActivitySession.submitted_at,
         end_utc,  # ✅ fallback so NULL doesn't break overlap logic
     )
 
@@ -837,8 +922,8 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
     # ✅ FALLBACK: infer activity types from APPROVED sessions OVERLAPPING the window
     if not activity_type_ids:
         session_end = func.coalesce(
-            ActivitySession.submitted_at,
             ActivitySession.expires_at,
+            ActivitySession.submitted_at,
             end_utc,
         )
 
@@ -923,9 +1008,9 @@ async def _infer_activity_type_ids_from_sessions(
     - Uses case-insensitive APPROVED match.
     """
     session_end = func.coalesce(
-        ActivitySession.submitted_at,
         ActivitySession.expires_at,
-        end_utc,  # ✅ fallback prevents NULL end from breaking overlap logic
+        ActivitySession.submitted_at,
+        end_utc,
     )
 
     aq = await db.execute(
@@ -1038,8 +1123,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
     async def _hours_in_window(student_id: int, at_id: int) -> float:
         session_end = func.coalesce(
-            ActivitySession.submitted_at,
             ActivitySession.expires_at,
+            ActivitySession.submitted_at,
             end_utc,
         )
 

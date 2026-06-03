@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os
 import math
-from datetime import datetime, date as date_type, time as time_type
+from datetime import datetime, date as date_type, time as time_type, timezone
 from typing import List
 
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
@@ -457,7 +457,6 @@ async def student_event_draft(
 ):
     return await get_student_event_draft_progress(db, student.id, event_id)
 
-
 @router.post("/student/events/submissions/{submission_id}/photos", response_model=PhotosUploadOut)
 async def upload_photos(
     submission_id: int,
@@ -467,6 +466,7 @@ async def upload_photos(
     images: List[UploadFile] | None = File(None, description="Upload multiple files with key 'images'"),
     lats: List[float] | None = Form(None, description="Latitude per image (same order as images)"),
     lngs: List[float] | None = Form(None, description="Longitude per image (same order as images)"),
+    captured_ats: List[str] | None = Form(None, description="Captured timestamp per image"),
 
     # legacy/mobile fallback fields
     image: UploadFile | None = File(None),
@@ -477,6 +477,7 @@ async def upload_photos(
     lng: float | None = Form(None),
     latitude: float | None = Form(None),
     longitude: float | None = Form(None),
+    captured_at: str | None = Form(None),
 
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
@@ -504,11 +505,25 @@ async def upload_photos(
     normalized_images: list[UploadFile] = []
     normalized_lats: list[float | None] = []
     normalized_lngs: list[float | None] = []
+    normalized_captured_ats: list[datetime | None] = []
+
+    def parse_captured_at(value: str | None) -> datetime | None:
+        if not value:
+            return None
+
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            return None
 
     if images:
         normalized_images = list(images)
         normalized_lats = [float(x) if x is not None else None for x in (lats or [])]
         normalized_lngs = [float(x) if x is not None else None for x in (lngs or [])]
+        normalized_captured_ats = [parse_captured_at(x) for x in (captured_ats or [])]
     else:
         single_upload = image or file or photo
         single_lat = lat if lat is not None else latitude
@@ -518,6 +533,7 @@ async def upload_photos(
             normalized_images = [single_upload]
             normalized_lats = [float(single_lat)] if single_lat is not None else [None]
             normalized_lngs = [float(single_lng)] if single_lng is not None else [None]
+            normalized_captured_ats = [parse_captured_at(captured_at)]
 
     if not normalized_images:
         raise HTTPException(
@@ -528,6 +544,7 @@ async def upload_photos(
                     "file_fields": ["images", "image", "file", "photo"],
                     "lat_fields": ["lats", "lat", "latitude"],
                     "lng_fields": ["lngs", "lng", "longitude"],
+                    "timestamp_fields": ["captured_ats", "captured_at"],
                 },
             },
         )
@@ -537,6 +554,10 @@ async def upload_photos(
             status_code=422,
             detail="lats/lngs count must match number of uploaded images",
         )
+
+    # If timestamp is missing, fallback to server current time
+    if len(normalized_captured_ats) < len(normalized_images):
+        normalized_captured_ats += [None] * (len(normalized_images) - len(normalized_captured_ats))
 
     required_photos = int(getattr(ev, "required_photos", 3) or 3)
     if start_seq < 1 or start_seq > required_photos:
@@ -579,11 +600,18 @@ async def upload_photos(
 
         lat_val = normalized_lats[idx]
         lng_val = normalized_lngs[idx]
+        captured_at_val = normalized_captured_ats[idx] or datetime.now(timezone.utc)
 
         dist = None
         in_geo = None
+
         if target_lat is not None and target_lng is not None and lat_val is not None and lng_val is not None:
-            dist = _haversine_m(float(lat_val), float(lng_val), float(target_lat), float(target_lng))
+            dist = _haversine_m(
+                float(lat_val),
+                float(lng_val),
+                float(target_lat),
+                float(target_lng),
+            )
             in_geo = dist <= radius_m
 
         photo_res = await db.execute(
@@ -600,6 +628,7 @@ async def upload_photos(
             existing.lng = float(lng_val) if lng_val is not None else None
             existing.distance_m = float(dist) if dist is not None else None
             existing.is_in_geofence = bool(in_geo) if in_geo is not None else None
+            existing.captured_at = captured_at_val
             photo_row = existing
         else:
             photo_row = EventSubmissionPhoto(
@@ -610,6 +639,7 @@ async def upload_photos(
                 lng=float(lng_val) if lng_val is not None else None,
                 distance_m=float(dist) if dist is not None else None,
                 is_in_geofence=bool(in_geo) if in_geo is not None else None,
+                captured_at=captured_at_val,
             )
             db.add(photo_row)
 

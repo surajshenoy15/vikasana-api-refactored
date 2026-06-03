@@ -95,11 +95,20 @@ class EventSubmissionPhoto(Base):
     distance_m = Column(Float, nullable=True)
     is_in_geofence = Column(Boolean, nullable=True)
 
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # when row was created in DB
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    # actual photo capture time from mobile app
+    captured_at = Column(DateTime(timezone=True), nullable=True)
 
     submission = relationship("EventSubmission", back_populates="photos")
 
-    __table_args__ = (UniqueConstraint("submission_id", "seq_no", name="uq_submission_seq"),)
+    __table_args__ = (
+        UniqueConstraint("submission_id", "seq_no", name="uq_submission_seq"),
+    )
 
 
 class EventActivityType(Base):
