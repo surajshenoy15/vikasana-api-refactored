@@ -480,7 +480,7 @@ async def send_student_welcome_email(
     to_name: str,
     app_download_url: str,
     *,
-    play_store_url: str = "https://github.com/surajshenoy15/loraa-connect_apk/releases/download/v1.0.0/loraa-connect.apk",
+    play_store_url: str = "https://loraa-connect.vikasanafoundation.org/install",
     app_store_url: str  = "https://apps.apple.com/app/vikasana/id000000000",
 ) -> None:
     api_key, from_email, from_name = _brevo_cfg()
