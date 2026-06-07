@@ -249,6 +249,56 @@ async def add_students_bulk(
 # ADMIN ROUTES
 # ─────────────────────────────────────────────────────────────
 admin_router = APIRouter(prefix="/admin/students", tags=["Admin - Students"])
+@admin_router.post("", response_model=StudentOut)
+async def add_student_manual_admin(
+    payload: StudentCreate,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    try:
+        # Admin can set college from payload.
+        # faculty_id is None because admin is creating directly.
+        s = await create_student(
+            db,
+            payload,
+            faculty_college=payload.college,
+            faculty_id=None,
+        )
+
+        return _student_out(s, activities_count=0, certificates_count=0)
+
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@admin_router.post("/bulk-upload", response_model=BulkUploadResult)
+async def add_students_bulk_admin(
+    file: UploadFile = File(...),
+    skip_duplicates: bool = Query(True, description="If true, existing USNs/emails will be skipped"),
+    college: str = Query("BNMIT", description="Default college for uploaded students"),
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only .csv file is allowed")
+
+    data = await file.read()
+
+    total, inserted, skipped, invalid, errors = await create_students_from_csv(
+        db=db,
+        csv_bytes=data,
+        skip_duplicates=skip_duplicates,
+        faculty_college=college,
+        faculty_id=None,
+    )
+
+    return BulkUploadResult(
+        total_rows=total,
+        inserted=inserted,
+        skipped_duplicates=skipped,
+        invalid_rows=invalid,
+        errors=errors,
+    )
 
 
 @admin_router.get("", response_model=list[StudentOut])
