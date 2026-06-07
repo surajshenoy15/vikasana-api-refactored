@@ -1,5 +1,5 @@
 import json
-from sqlalchemy import Column, Integer, DateTime, ForeignKey, Text, func
+from sqlalchemy import Column, Integer, DateTime, ForeignKey, Text, String, func
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -31,3 +31,26 @@ class StudentFaceEmbedding(Base):
 
     def set_embedding(self, emb: list):
         self.embedding = json.dumps(emb)
+
+
+
+class StudentFaceEnrollmentImage(Base):
+    __tablename__ = "student_face_enrollment_images"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    student_id = Column(
+        Integer,
+        ForeignKey("students.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    image_url = Column(String, nullable=False)
+    image_key = Column(String, nullable=True)
+
+    slot = Column(Integer, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    student = relationship("Student")
