@@ -285,12 +285,14 @@ async def add_students_bulk_admin(
     data = await file.read()
 
     total, inserted, skipped, invalid, errors = await create_students_from_csv(
-        db=db,
-        csv_bytes=data,
-        skip_duplicates=skip_duplicates,
-        faculty_college=college,
-        faculty_id=None,
-    )
+    db=db,
+    csv_bytes=data,
+    skip_duplicates=skip_duplicates,
+    faculty_college=college,
+    faculty_id=None,
+    allow_csv_college=True,
+    allow_csv_faculty_email=True,
+)
 
     return BulkUploadResult(
         total_rows=total,
