@@ -471,6 +471,25 @@ async def update_student_admin(
         certificates_count=int(certificates_count),
     )
 
+@admin_router.delete("/{student_id}")
+async def delete_student_admin(
+    student_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    s = await db.get(Student, student_id)
+
+    if not s:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    await db.delete(s)
+    await db.commit()
+
+    return {
+        "success": True,
+        "message": "Student deleted successfully",
+        "student_id": student_id,
+    }
 
 @admin_router.patch("/{student_id}/points")
 async def update_student_points_admin(
