@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, func, cast, String
+from sqlalchemy import select, or_, func, cast, String, delete
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
@@ -15,7 +15,7 @@ from app.features.certificates.models import Certificate
 
 # ✅ FIX: Required for /students/me visible points calculation
 from app.features.activities.models import ActivitySession, ActivityType
-
+from app.features.face.models import StudentFaceEmbedding, StudentFaceEnrollmentImage
 from app.features.students.service import create_student, create_students_from_csv
 from app.features.students.points_service import (
     get_student_point_adjustments,
@@ -391,7 +391,114 @@ async def list_students_admin(
         for (s, activities_count, certificates_count) in rows
     ]
 
+@admin_router.get("/{student_id}/face-enrollment")
+async def get_student_face_enrollment_details(
+    student_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    student_result = await db.execute(
+        select(Student).where(Student.id == student_id)
+    )
+    student = student_result.scalar_one_or_none()
 
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    img_result = await db.execute(
+        select(StudentFaceEnrollmentImage)
+        .where(StudentFaceEnrollmentImage.student_id == student_id)
+        .order_by(
+            StudentFaceEnrollmentImage.slot.asc(),
+            StudentFaceEnrollmentImage.id.asc(),
+        )
+    )
+    images_db = img_result.scalars().all()
+
+    emb_result = await db.execute(
+        select(StudentFaceEmbedding).where(
+            StudentFaceEmbedding.student_id == student_id
+        )
+    )
+    embedding = emb_result.scalar_one_or_none()
+
+    images = []
+    for idx, img in enumerate(images_db, start=1):
+        images.append(
+            {
+                "id": img.id,
+                "slot": img.slot or idx,
+                "image_url": img.image_url,
+                "image_key": img.image_key,
+                "captured_at": img.created_at,
+            }
+        )
+
+    face_count = len(images)
+    required_count = 5
+
+    if face_count >= required_count:
+        status = "COMPLETED"
+    elif face_count > 0:
+        status = "PARTIAL"
+    elif embedding and embedding.photo_count:
+        status = "EMBEDDING_ONLY"
+    else:
+        status = "PENDING"
+
+    return {
+        "student": {
+            "id": student.id,
+            "name": student.name,
+            "email": student.email,
+            "usn": student.usn,
+            "branch": student.branch,
+            "college": student.college,
+        },
+        "face_count": face_count,
+        "embedding_photo_count": embedding.photo_count if embedding else 0,
+        "required_count": required_count,
+        "status": status,
+        "images": images,
+    }
+
+
+@admin_router.delete("/{student_id}/face-enrollment")
+async def reset_student_face_enrollment(
+    student_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    student_result = await db.execute(
+        select(Student).where(Student.id == student_id)
+    )
+    student = student_result.scalar_one_or_none()
+
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    await db.execute(
+        delete(StudentFaceEnrollmentImage).where(
+            StudentFaceEnrollmentImage.student_id == student_id
+        )
+    )
+
+    await db.execute(
+        delete(StudentFaceEmbedding).where(
+            StudentFaceEmbedding.student_id == student_id
+        )
+    )
+
+    student.face_enrolled = False
+    student.face_enrolled_at = None
+
+    await db.commit()
+
+    return {
+        "ok": True,
+        "student_id": student.id,
+        "message": "Face enrollment reset. Student must capture face images again.",
+    }
 @admin_router.patch("/{student_id}", response_model=StudentOut)
 async def update_student_admin(
     student_id: int,
