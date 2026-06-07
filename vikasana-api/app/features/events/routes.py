@@ -16,6 +16,7 @@ from app.core.activity_storage import upload_activity_image
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import selectinload
+from app.features.students.models import Student
 
 from app.features.events.models import Event, EventSubmission, EventSubmissionPhoto
 from app.features.events.schemas.events import (
@@ -666,7 +667,6 @@ async def submit_event(
 # =========================================================
 
 @router.get("/admin/events/{event_id}/submissions")
-@router.get("/admin/events/{event_id}/submissions")
 async def admin_list_event_submissions(
     event_id: int,
     db: AsyncSession = Depends(get_db),
@@ -680,12 +680,27 @@ async def admin_list_event_submissions(
 
     rows = (await db.execute(stmt)).scalars().all()
 
+    student_ids = [
+        int(getattr(sub, "student_id"))
+        for sub in rows
+        if getattr(sub, "student_id", None) is not None
+    ]
+
+    students_by_id = {}
+
+    if student_ids:
+        student_res = await db.execute(
+            select(Student).where(Student.id.in_(student_ids))
+        )
+        students = student_res.scalars().all()
+        students_by_id = {int(st.id): st for st in students}
+
     safe_rows = []
 
     for sub in rows:
-        student = getattr(sub, "student", None)
+        sid = getattr(sub, "student_id", None)
+        student = students_by_id.get(int(sid)) if sid is not None else None
 
-        # Count photos without exposing URLs
         photo_count_res = await db.execute(
             select(func.count(EventSubmissionPhoto.id)).where(
                 EventSubmissionPhoto.submission_id == sub.id
@@ -700,23 +715,11 @@ async def admin_list_event_submissions(
             "id": getattr(sub, "id", None),
             "submission_id": getattr(sub, "id", None),
             "event_id": getattr(sub, "event_id", None),
-            "student_id": getattr(sub, "student_id", None),
+            "student_id": sid,
 
-            "student_name": (
-                getattr(student, "name", None)
-                or getattr(sub, "student_name", None)
-                or ""
-            ),
-            "student_usn": (
-                getattr(student, "usn", None)
-                or getattr(sub, "student_usn", None)
-                or ""
-            ),
-            "college": (
-                getattr(student, "college", None)
-                or getattr(sub, "college", None)
-                or ""
-            ),
+            "student_name": getattr(student, "name", None) or "",
+            "student_usn": getattr(student, "usn", None) or "",
+            "college": getattr(student, "college", None) or "",
 
             "status": status,
             "submitted_at": getattr(sub, "submitted_at", None),
@@ -725,8 +728,6 @@ async def admin_list_event_submissions(
 
             "description": getattr(sub, "description", None),
             "points_awarded": int(getattr(sub, "points_awarded", 0) or 0),
-
-            # ✅ Safe metadata only
             "photo_count": photo_count,
         })
 
@@ -737,7 +738,6 @@ async def admin_list_event_submissions(
             "Pragma": "no-cache",
         },
     )
-
 @router.get("/admin/submissions/{submission_id}/photos")
 async def admin_get_submission_photos(
     submission_id: int,
