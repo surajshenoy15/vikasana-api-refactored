@@ -167,6 +167,45 @@ async def save_boxed_image_to_storage(
 
     return object_name
 
+async def save_enrollment_image_to_storage(
+    image_bytes: bytes,
+    student_id: int,
+    slot: int,
+    content_type: str = "image/jpeg",
+) -> str:
+    """
+    Saves original face enrollment selfie into face-verification bucket.
+    Returns object key only, not base64.
+    """
+    if not image_bytes:
+        raise ValueError("image_bytes is empty")
+
+    bucket = _face_bucket()
+
+    ext = "jpg"
+    ct = (content_type or "").lower()
+    if "png" in ct:
+        ext = "png"
+    elif "webp" in ct:
+        ext = "webp"
+
+    object_name = f"face-enrollment/{student_id}/{slot}_{uuid.uuid4().hex}.{ext}"
+
+    def _put():
+        client = get_minio()
+        ensure_bucket(client, bucket)
+
+        client.put_object(
+            bucket_name=bucket,
+            object_name=object_name,
+            data=BytesIO(image_bytes),
+            length=len(image_bytes),
+            content_type=content_type or "image/jpeg",
+        )
+
+    await anyio.to_thread.run_sync(_put)
+
+    return object_name
 
 def draw_box(image_bytes: bytes, face_box: list | None, matched: bool) -> bytes:
     import cv2
@@ -246,21 +285,32 @@ async def enroll_face(
             continue
 
         try:
+            # This still uses base64 only temporarily for face embedding extraction.
+            # It is NOT saved in DB.
             emb = cv_face_service.extract_embedding(file_to_b64(contents))
             embeddings.append(emb)
 
             content_type = img.content_type or "image/jpeg"
-            b64_image = base64.b64encode(contents).decode("utf-8")
-            image_url = f"data:{content_type};base64,{b64_image}"
+
+            image_key = await save_enrollment_image_to_storage(
+                image_bytes=contents,
+                student_id=student_id,
+                slot=idx,
+                content_type=content_type,
+            )
+
+            image_url = f"s3://{_face_bucket()}/{image_key}"
 
             enrollment_images.append(
                 {
                     "slot": idx,
                     "image_url": image_url,
-                    "image_key": None,
+                    "image_key": image_key,
                 }
             )
-        except Exception:
+
+        except Exception as e:
+            print(f"❌ Face enrollment image failed student={student_id}, slot={idx}: {e}")
             failed += 1
 
     if len(embeddings) < 3:
@@ -317,8 +367,9 @@ async def enroll_face(
         "photos_processed": len(embeddings),
         "photos_failed": failed,
         "enrollment_images_saved": len(enrollment_images),
+        "storage": "bucket",
+        "bucket": _face_bucket(),
     }
-# --------------------------------------------------
 # VERIFY ACTIVITY SESSION
 # --------------------------------------------------
 
