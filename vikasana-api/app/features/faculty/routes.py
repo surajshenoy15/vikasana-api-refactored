@@ -230,7 +230,7 @@ async def dashboard_stats(
 async def list_activity_sessions(
     q: str | None = Query(None, description="Search by student name/usn/activity"),
     status: str | None = Query(None, description="DRAFT/SUBMITTED/APPROVED/REJECTED/FLAGGED/EXPIRED"),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int | None = Query(None, ge=1, le=10000),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),
@@ -240,17 +240,16 @@ async def list_activity_sessions(
         .options(selectinload(ActivitySession.student))
         .where(ActivitySession.student.has(Student.college == current_faculty.college))
         .order_by(desc(ActivitySession.created_at))
-        .limit(limit)
-        .offset(offset)
     )
 
     if q:
         qq = f"%{q.strip().lower()}%"
         stmt = stmt.where(
-            or_(
-                func.lower(Student.name).like(qq),
-                func.lower(Student.usn).like(qq),
-                func.lower(ActivitySession.activity_name).like(qq),
+            ActivitySession.student.has(
+                or_(
+                    func.lower(Student.name).like(qq),
+                    func.lower(Student.usn).like(qq),
+                )
             )
         )
 
@@ -258,6 +257,12 @@ async def list_activity_sessions(
         s = status.strip().upper()
         if s in ActivitySessionStatus.__members__:
             stmt = stmt.where(ActivitySession.status == ActivitySessionStatus[s])
+
+    if limit:
+        stmt = stmt.limit(limit)
+
+    if offset:
+        stmt = stmt.offset(offset)
 
     sessions = (await db.execute(stmt)).scalars().all()
 
@@ -272,7 +277,11 @@ async def list_activity_sessions(
                 "usn": stu.usn if stu else "—",
                 "category": None,
                 "description": sess.description,
-                "status": (sess.status.value if hasattr(sess.status, "value") else str(sess.status)).lower(),
+                "status": (
+                    sess.status.value
+                    if hasattr(sess.status, "value")
+                    else str(sess.status)
+                ).lower(),
                 "submitted_at": sess.submitted_at or sess.created_at,
             }
         )

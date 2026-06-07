@@ -123,7 +123,7 @@ async def list_students(
     branch: str | None = Query(None, description="Optional filter by branch (exact match)."),
     passout_year: int | None = Query(None, description="Optional filter by passout year."),
     admitted_year: int | None = Query(None, description="Optional filter by admitted year."),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int | None = Query(None, ge=1, le=10000),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),
@@ -259,7 +259,7 @@ async def list_students_admin(
     branch: str | None = Query(None, description="Optional filter by branch (exact match)."),
     passout_year: int | None = Query(None, description="Optional filter by passout year."),
     admitted_year: int | None = Query(None, description="Optional filter by admitted year."),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int | None = Query(None, ge=1, le=10000),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     current_admin: Admin = Depends(get_current_admin),
@@ -319,7 +319,13 @@ async def list_students_admin(
     if admitted_year is not None:
         stmt = stmt.where(Student.admitted_year == admitted_year)
 
-    stmt = stmt.order_by(Student.id.desc()).limit(limit).offset(offset)
+    stmt = stmt.order_by(Student.id.desc())
+
+    if limit:
+        stmt = stmt.limit(limit)
+
+    if offset:
+        stmt = stmt.offset(offset)
 
     result = await db.execute(stmt)
     rows = result.all()
