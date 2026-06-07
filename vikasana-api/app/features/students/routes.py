@@ -12,7 +12,9 @@ from app.features.auth.models import Admin
 from app.features.students.models import Student, StudentType
 from app.features.events.models import Event, EventSubmission
 from app.features.certificates.models import Certificate
-
+import os
+from datetime import timedelta
+from app.core.minio_client import get_minio
 # ✅ FIX: Required for /students/me visible points calculation
 from app.features.activities.models import ActivitySession, ActivityType
 from app.features.face.models import StudentFaceEmbedding, StudentFaceEnrollmentImage
@@ -109,7 +111,41 @@ def _point_item_out(item) -> StudentPointAdjustmentOut:
         created_at=item.created_at,
     )
 
+def _env(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
 
+
+def _storage_provider() -> str:
+    return _env("S3_PROVIDER", "minio").lower()
+
+
+def _face_bucket() -> str:
+    if _storage_provider() == "aws":
+        return (
+            _env("AWS_S3_BUCKET_FACE")
+            or _env("MINIO_FACE_BUCKET")
+            or "face-verification"
+        )
+
+    return _env("MINIO_FACE_BUCKET", "face-verification")
+
+
+def create_face_enrollment_signed_url(image_key: str) -> str | None:
+    if not image_key:
+        return None
+
+    try:
+        client = get_minio()
+
+        return client.presigned_get_object(
+            bucket_name=_face_bucket(),
+            object_name=image_key,
+            expires=timedelta(minutes=15),
+        )
+
+    except Exception as e:
+        print(f"⚠️ Failed to create signed URL for face image {image_key}: {e}")
+        return None
 # ─────────────────────────────────────────────────────────────
 # FACULTY ROUTES
 # ─────────────────────────────────────────────────────────────
@@ -423,13 +459,20 @@ async def get_student_face_enrollment_details(
     embedding = emb_result.scalar_one_or_none()
 
     images = []
+
     for idx, img in enumerate(images_db, start=1):
+        signed_url = None
+
+        if img.image_key:
+            signed_url = create_face_enrollment_signed_url(img.image_key)
+
         images.append(
             {
                 "id": img.id,
                 "slot": img.slot or idx,
                 "image_url": img.image_url,
                 "image_key": img.image_key,
+                "signed_url": signed_url,
                 "captured_at": img.created_at,
             }
         )
@@ -461,7 +504,6 @@ async def get_student_face_enrollment_details(
         "status": status,
         "images": images,
     }
-
 
 @admin_router.delete("/{student_id}/face-enrollment")
 async def reset_student_face_enrollment(
