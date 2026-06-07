@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from datetime import datetime
 import base64
 import uuid
@@ -12,7 +12,7 @@ from app.core.database import get_db
 from app.core.config import settings
 from app.core.minio_client import get_minio, ensure_bucket
 from app.features.students.models import Student
-from app.features.face.models import StudentFaceEmbedding
+from app.features.face.models import StudentFaceEmbedding, StudentFaceEnrollmentImage
 from app.features.activities.models import ActivitySession, ActivitySessionStatus
 from app.features.activities.models import ActivityPhoto
 from app.features.activities.models import ActivityFaceCheck
@@ -235,9 +235,10 @@ async def enroll_face(
         raise HTTPException(status_code=404, detail="Student not found.")
 
     embeddings = []
+    enrollment_images = []
     failed = 0
 
-    for img in images:
+    for idx, img in enumerate(images, start=1):
         contents = await img.read()
 
         if not contents:
@@ -247,6 +248,18 @@ async def enroll_face(
         try:
             emb = cv_face_service.extract_embedding(file_to_b64(contents))
             embeddings.append(emb)
+
+            content_type = img.content_type or "image/jpeg"
+            b64_image = base64.b64encode(contents).decode("utf-8")
+            image_url = f"data:{content_type};base64,{b64_image}"
+
+            enrollment_images.append(
+                {
+                    "slot": idx,
+                    "image_url": image_url,
+                    "image_key": None,
+                }
+            )
         except Exception:
             failed += 1
 
@@ -279,6 +292,22 @@ async def enroll_face(
     student.face_enrolled = True
     student.face_enrolled_at = datetime.utcnow()
 
+    await db.execute(
+        delete(StudentFaceEnrollmentImage).where(
+            StudentFaceEnrollmentImage.student_id == student_id
+        )
+    )
+
+    for item in enrollment_images:
+        db.add(
+            StudentFaceEnrollmentImage(
+                student_id=student_id,
+                image_url=item["image_url"],
+                image_key=item["image_key"],
+                slot=item["slot"],
+            )
+        )
+
     await db.commit()
     await db.refresh(student)
 
@@ -287,9 +316,8 @@ async def enroll_face(
         "student_id": student_id,
         "photos_processed": len(embeddings),
         "photos_failed": failed,
+        "enrollment_images_saved": len(enrollment_images),
     }
-
-
 # --------------------------------------------------
 # VERIFY ACTIVITY SESSION
 # --------------------------------------------------
