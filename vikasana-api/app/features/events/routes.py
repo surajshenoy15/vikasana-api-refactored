@@ -1,5 +1,6 @@
 # app/routes/events.py
 from __future__ import annotations
+from pydantic import BaseModel
 import os
 import math
 from datetime import datetime, date as date_type, time as time_type, timezone
@@ -19,7 +20,12 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import selectinload
 from app.features.students.models import Student
 
-from app.features.events.models import Event, EventSubmission, EventSubmissionPhoto
+from app.features.events.models import (
+    Event,
+    EventSubmission,
+    EventSubmissionPhoto,
+    EventRoleAssignment,
+)
 from app.features.events.schemas.events import (
     EventCreateIn,
     EventUpdateIn,
@@ -122,10 +128,14 @@ def _event_out_dict(ev: Event) -> dict:
         "geo_radius_m": int(
             getattr(ev, "geo_radius_m", DEFAULT_EVENT_RADIUS_M) or DEFAULT_EVENT_RADIUS_M
         ),
+
+        # ✅ NEW: volunteer/participant role protection fields
+        "exclusive_group_key": getattr(ev, "exclusive_group_key", None),
+        "event_role": getattr(ev, "event_role", None) or "PARTICIPANT",
+
         "activity_type_ids": activity_type_ids,
         "scoring_rules": scoring_rules,
     }
-
 def _normalize_activity_type_ids(payload: EventCreateIn) -> list[int]:
     raw = getattr(payload, "activity_type_ids", None) or []
 
@@ -312,6 +322,151 @@ async def admin_presign_private_media(
             status_code=500,
             detail=f"Failed to generate private media URL: {str(e)}",
         )
+    
+
+
+class VolunteerAssignRequest(BaseModel):
+    exclusive_group_key: str
+    usns: list[str]
+
+
+@router.post("/admin/events/assign-volunteers")
+async def assign_volunteers(
+    payload: VolunteerAssignRequest,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    group_key = (payload.exclusive_group_key or "").strip()
+
+    if not group_key:
+        raise HTTPException(status_code=400, detail="exclusive_group_key is required")
+
+    clean_usns = []
+    for usn in payload.usns:
+        if usn and usn.strip():
+            clean_usns.append(usn.strip().upper())
+
+    clean_usns = list(dict.fromkeys(clean_usns))
+
+    if not clean_usns:
+        raise HTTPException(status_code=400, detail="No USNs provided")
+
+    students_result = await db.execute(
+        select(Student).where(func.upper(Student.usn).in_(clean_usns))
+    )
+    students = students_result.scalars().all()
+
+    found_usns = {(s.usn or "").upper() for s in students}
+    missing_usns = [u for u in clean_usns if u not in found_usns]
+
+    created = 0
+    updated = 0
+
+    for student in students:
+        existing_result = await db.execute(
+            select(EventRoleAssignment).where(
+                EventRoleAssignment.student_id == student.id,
+                EventRoleAssignment.exclusive_group_key == group_key,
+            )
+        )
+        existing = existing_result.scalar_one_or_none()
+
+        if existing:
+            existing.role_allowed = "VOLUNTEER"
+            updated += 1
+        else:
+            db.add(
+                EventRoleAssignment(
+                    student_id=student.id,
+                    exclusive_group_key=group_key,
+                    role_allowed="VOLUNTEER",
+                )
+            )
+            created += 1
+
+    await db.commit()
+
+    await cache_set("admin:events:list", None, ttl=1)
+    await cache_set("student:events:list", None, ttl=1)
+
+    return {
+        "message": "Volunteer assignments saved",
+        "exclusive_group_key": group_key,
+        "total_input": len(clean_usns),
+        "created": created,
+        "updated": updated,
+        "missing_usns": missing_usns,
+    }
+
+
+@router.get("/admin/events/role-assignments")
+async def list_role_assignments(
+    exclusive_group_key: str,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    group_key = (exclusive_group_key or "").strip()
+
+    if not group_key:
+        raise HTTPException(status_code=400, detail="exclusive_group_key is required")
+
+    result = await db.execute(
+        select(
+            EventRoleAssignment.id.label("assignment_id"),
+            EventRoleAssignment.exclusive_group_key,
+            EventRoleAssignment.role_allowed,
+            EventRoleAssignment.created_at,
+            Student.id.label("student_id"),
+            Student.name,
+            Student.usn,
+            Student.email,
+        )
+        .join(Student, Student.id == EventRoleAssignment.student_id)
+        .where(EventRoleAssignment.exclusive_group_key == group_key)
+        .order_by(Student.usn)
+    )
+
+    rows = result.mappings().all()
+
+    return [
+        {
+            "assignment_id": row["assignment_id"],
+            "exclusive_group_key": row["exclusive_group_key"],
+            "role_allowed": row["role_allowed"],
+            "created_at": row["created_at"],
+            "student_id": row["student_id"],
+            "name": row["name"],
+            "usn": row["usn"],
+            "email": row["email"],
+        }
+        for row in rows
+    ]
+
+
+@router.delete("/admin/events/role-assignments/{assignment_id}")
+async def delete_role_assignment(
+    assignment_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    result = await db.execute(
+        select(EventRoleAssignment).where(EventRoleAssignment.id == assignment_id)
+    )
+    assignment = result.scalar_one_or_none()
+
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Role assignment not found")
+
+    await db.delete(assignment)
+    await db.commit()
+
+    await cache_set("admin:events:list", None, ttl=1)
+    await cache_set("student:events:list", None, ttl=1)
+
+    return {
+        "message": "Volunteer assignment removed",
+        "assignment_id": assignment_id,
+    }
 # =========================================================
 # ---------------------- STUDENT ---------------------------
 # =========================================================
@@ -322,9 +477,27 @@ async def student_events(
     student=Depends(get_current_student),
 ):
     events = await list_active_events(db)
+
+    # ✅ NEW: hide wrong-role events
+    # - Volunteers see only VOLUNTEER event for the same group
+    # - Normal students see only PARTICIPANT event
+    visible_events = []
+
+    for ev in events:
+        allowed = await can_student_view_event(
+            db=db,
+            student_id=student.id,
+            event=ev,
+        )
+
+        if allowed:
+            visible_events.append(ev)
+
+    events = visible_events
+
     event_ids = [ev.id for ev in events]
 
-    # registered counts (unchanged)
+    # registered counts
     registered_count_map: dict[int, int] = {}
     if event_ids:
         count_rows = await db.execute(
@@ -341,6 +514,7 @@ async def student_events(
     at_map: dict[int, ActivityType] = {}
     all_at_ids: set[int] = set()
     items: list[dict] = []
+
     for ev in events:
         it = _event_out_dict(ev)
         for r in it.get("scoring_rules", []):
@@ -364,6 +538,7 @@ async def student_events(
             mode = str(r.get("score_mode") or "AUTO").upper()
             mh = float(r.get("min_required_hours") or 0)
             min_hours = max(min_hours, mh)
+
             if mode == "MANUAL":
                 has_manual = True
                 manual_total += int(r.get("manual_points") or 0)
@@ -393,16 +568,17 @@ async def student_events(
             display = "—"
 
         return {
-            "points_mode": mode,                                  # fixed | auto | mixed | none
+            "points_mode": mode,
             "manual_points_total": manual_total,
             "auto_max_total": auto_max_total,
-            "max_points": manual_total + auto_max_total,          # best-case achievable
+            "max_points": manual_total + auto_max_total,
             "min_required_hours": min_hours,
-            "points_display": display,                            # ready-to-render string
-            "points": manual_total if mode == "fixed" else 0,     # legacy field
+            "points_display": display,
+            "points": manual_total if mode == "fixed" else 0,
         }
 
     result = []
+
     for ev, item in zip(events, items):
         item["registered_count"] = registered_count_map.get(ev.id, 0)
         item["max_participants"] = getattr(ev, "max_participants", None) or 100
@@ -411,8 +587,6 @@ async def student_events(
         result.append(item)
 
     return result
-
-
 @router.get("/student/events/{event_id}", response_model=EventOut)
 async def student_event_detail(
     event_id: int,
@@ -421,8 +595,16 @@ async def student_event_detail(
 ):
     res = await db.execute(select(Event).where(Event.id == event_id))
     ev = res.scalar_one_or_none()
+
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
+
+    await validate_event_role_access(
+        db=db,
+        student_id=student.id,
+        event_id=event_id,
+    )
+
     return _event_out_dict(ev)
 
 
@@ -463,8 +645,13 @@ async def student_event_draft(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    return await get_student_event_draft_progress(db, student.id, event_id)
+    await validate_event_role_access(
+        db=db,
+        student_id=student.id,
+        event_id=event_id,
+    )
 
+    return await get_student_event_draft_progress(db, student.id, event_id)
 @router.post("/student/events/submissions/{submission_id}/photos", response_model=PhotosUploadOut)
 async def upload_photos(
     submission_id: int,
@@ -497,14 +684,27 @@ async def upload_photos(
         )
     )
     sub = sub_res.scalar_one_or_none()
+
     if not sub:
         raise HTTPException(status_code=404, detail="Submission not found for this student")
+
+    # ✅ NEW: prevent wrong-role student from uploading photos
+    # Example:
+    # - Volunteer cannot upload photos for participant event
+    # - Normal student cannot upload photos for volunteer event
+    # - Student cannot continue another role in same exclusive_group_key
+    await validate_event_role_access(
+        db=db,
+        student_id=student.id,
+        event_id=sub.event_id,
+    )
 
     if sub.status != "in_progress":
         raise HTTPException(status_code=400, detail="Submission already completed")
 
     ev_res = await db.execute(select(Event).where(Event.id == sub.event_id))
     ev = ev_res.scalar_one_or_none()
+
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
 
@@ -568,6 +768,7 @@ async def upload_photos(
         normalized_captured_ats += [None] * (len(normalized_images) - len(normalized_captured_ats))
 
     required_photos = int(getattr(ev, "required_photos", 3) or 3)
+
     if start_seq < 1 or start_seq > required_photos:
         raise HTTPException(
             status_code=400,
@@ -594,6 +795,7 @@ async def upload_photos(
             break
 
         file_bytes = await img.read()
+
         if not file_bytes:
             seq_no += 1
             continue
@@ -653,10 +855,14 @@ async def upload_photos(
 
         await db.commit()
         await db.refresh(photo_row)
+
         results.append(photo_row)
         seq_no += 1
 
-    return PhotosUploadOut(submission_id=submission_id, photos=results)
+    return PhotosUploadOut(
+        submission_id=submission_id,
+        photos=results,
+    )
 
 
 @router.post("/student/submissions/{submission_id}/submit", response_model=SubmissionOut)
@@ -666,6 +872,23 @@ async def submit_event(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
+    sub_res = await db.execute(
+        select(EventSubmission).where(
+            EventSubmission.id == submission_id,
+            EventSubmission.student_id == student.id,
+        )
+    )
+    sub = sub_res.scalar_one_or_none()
+
+    if not sub:
+        raise HTTPException(status_code=404, detail="Submission not found for this student")
+
+    await validate_event_role_access(
+        db=db,
+        student_id=student.id,
+        event_id=sub.event_id,
+    )
+
     return await final_submit(db, submission_id, student.id, payload.description)
 
 
@@ -693,7 +916,7 @@ async def admin_list_event_submissions(
             EventSubmission.created_at.label("created_at"),
             
             EventSubmission.description.label("description"),
-            EventSubmission.points_awarded.label("points_awarded"),
+            EventSubmission.awarded_points.label("points_awarded"),
 
             func.count(EventSubmissionPhoto.id).label("photo_count"),
         )
@@ -715,7 +938,7 @@ async def admin_list_event_submissions(
             EventSubmission.created_at,
             
             EventSubmission.description,
-            EventSubmission.points_awarded,
+            EventSubmission.awarded_points,
         )
         .order_by(EventSubmission.id.desc())
     )
