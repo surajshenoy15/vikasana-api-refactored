@@ -1686,6 +1686,8 @@ async def create_event(db: AsyncSession, payload) -> dict:
             "location_lat": getattr(event, "location_lat", None),
             "location_lng": getattr(event, "location_lng", None),
             "geo_radius_m": getattr(event, "geo_radius_m", None),
+            "exclusive_group_key": getattr(event, "exclusive_group_key", None),
+            "event_role": getattr(event, "event_role", None) or "PARTICIPANT",
             "activity_type_ids": ids,
             "scoring_rules": [
                 {
@@ -1910,6 +1912,8 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
         "location_lat": getattr(event, "location_lat", None),
         "location_lng": getattr(event, "location_lng", None),
         "geo_radius_m": getattr(event, "geo_radius_m", None),
+        "exclusive_group_key": getattr(event, "exclusive_group_key", None),
+        "event_role": getattr(event, "event_role", None) or "PARTICIPANT",
         "activity_type_ids": new_ids,
         "scoring_rules": [
             {
