@@ -12,6 +12,7 @@ from sqlalchemy import (
     Date,
     Time,
     Float,
+    func,
 )
 from sqlalchemy.orm import relationship
 
@@ -41,6 +42,13 @@ class Event(Base):
     location_lat = Column(Float, nullable=True)
     location_lng = Column(Float, nullable=True)
     geo_radius_m = Column(Integer, nullable=False, default=500)
+
+    # ✅ NEW: Used to connect participant + volunteer events of same main event
+    # Example: green_circuit_2026
+    exclusive_group_key = Column(String(120), nullable=True, index=True)
+
+    # ✅ NEW: PARTICIPANT / VOLUNTEER
+    event_role = Column(String(30), nullable=False, default="PARTICIPANT")
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -125,4 +133,34 @@ class EventActivityType(Base):
 
     __table_args__ = (
         UniqueConstraint("event_id", "activity_type_id", name="uq_event_activity_type"),
+    )
+
+
+# ✅ NEW: stores who is allowed as volunteer/participant for one main event group
+class EventRoleAssignment(Base):
+    __tablename__ = "event_role_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    student_id = Column(
+        Integer,
+        ForeignKey("students.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # Same key used in events.exclusive_group_key
+    # Example: green_circuit_2026
+    exclusive_group_key = Column(String(120), nullable=False, index=True)
+
+    # VOLUNTEER / PARTICIPANT
+    role_allowed = Column(String(30), nullable=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "student_id",
+            "exclusive_group_key",
+            name="uq_student_event_group_role",
+        ),
     )
