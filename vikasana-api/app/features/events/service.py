@@ -1629,19 +1629,23 @@ async def create_event(db: AsyncSession, payload) -> dict:
     try:
         event = Event(
             title=str(getattr(payload, "title", "")).strip(),
-            description=(getattr(payload, "description", None) or None),
-            required_photos=required_photos,
-            is_active=True,
-            event_date=event_date,
-            start_time=start_time,
-            end_time=end_time,
-            thumbnail_url=getattr(payload, "thumbnail_url", None),
-            venue_name=getattr(payload, "venue_name", None),
-            maps_url=maps_url,
-            location_lat=getattr(payload, "location_lat", None),
-            location_lng=getattr(payload, "location_lng", None),
-            geo_radius_m=getattr(payload, "geo_radius_m", None),
-        )
+        description=(getattr(payload, "description", None) or None),
+        required_photos=required_photos,
+        is_active=True,
+        event_date=event_date,
+        start_time=start_time,
+         end_time=end_time,
+        thumbnail_url=getattr(payload, "thumbnail_url", None),
+        venue_name=getattr(payload, "venue_name", None),
+        maps_url=maps_url,
+        location_lat=getattr(payload, "location_lat", None),
+        location_lng=getattr(payload, "location_lng", None),
+        geo_radius_m=getattr(payload, "geo_radius_m", None),
+
+    # ✅ NEW: participant/volunteer role protection
+        exclusive_group_key=getattr(payload, "exclusive_group_key", None),
+        event_role=(getattr(payload, "event_role", None) or "PARTICIPANT").upper(),
+    )
         db.add(event)
         await db.flush()
 
@@ -1735,6 +1739,8 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
     location_lat = getattr(payload, "location_lat", None)
     location_lng = getattr(payload, "location_lng", None)
     geo_radius_m = getattr(payload, "geo_radius_m", None)
+    exclusive_group_key = getattr(payload, "exclusive_group_key", None)
+    event_role = getattr(payload, "event_role", None)
 
     is_active = getattr(payload, "is_active", None)
 
@@ -1770,6 +1776,12 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
 
     if geo_radius_m is not None:
         event.geo_radius_m = geo_radius_m
+
+    if exclusive_group_key is not None:
+        event.exclusive_group_key = exclusive_group_key or None
+
+    if event_role is not None:
+        event.event_role = str(event_role or "PARTICIPANT").strip().upper()
 
     if is_active is not None:
         event.is_active = bool(is_active)

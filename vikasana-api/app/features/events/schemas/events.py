@@ -64,6 +64,13 @@ class EventCreateIn(BaseModel):
     location_lng: Optional[float] = None
     geo_radius_m: Optional[int] = None
 
+    # ✅ NEW: participant/volunteer role protection
+    # Example:
+    # Participant event -> event_role="PARTICIPANT", exclusive_group_key="green_circuit_2026"
+    # Volunteer event   -> event_role="VOLUNTEER",   exclusive_group_key="green_circuit_2026"
+    exclusive_group_key: Optional[str] = None
+    event_role: Optional[str] = "PARTICIPANT"
+
     activity_type_ids: List[int] = Field(default_factory=list)
     custom_activities: List[str] = Field(default_factory=list)
     scoring_rules: List[EventScoringRuleIn] = Field(default_factory=list)
@@ -131,6 +138,32 @@ class EventCreateIn(BaseModel):
             return [str(x).strip() for x in v if str(x).strip()]
         return []
 
+    @field_validator("event_role", mode="before")
+    @classmethod
+    def _normalize_event_role(cls, v: Any):
+        if v is None:
+            return "PARTICIPANT"
+
+        role = str(v).strip().upper()
+
+        if role not in {"PARTICIPANT", "VOLUNTEER"}:
+            return "PARTICIPANT"
+
+        return role
+
+    @field_validator("exclusive_group_key", mode="before")
+    @classmethod
+    def _normalize_exclusive_group_key(cls, v: Any):
+        if v is None:
+            return None
+
+        key = str(v).strip()
+
+        if not key:
+            return None
+
+        return key
+
 
 class EventUpdateIn(BaseModel):
     """
@@ -156,6 +189,10 @@ class EventUpdateIn(BaseModel):
     location_lat: Optional[float] = None
     location_lng: Optional[float] = None
     geo_radius_m: Optional[int] = None
+
+    # ✅ NEW: participant/volunteer role protection
+    exclusive_group_key: Optional[str] = None
+    event_role: Optional[str] = None
 
     activity_type_ids: Optional[List[int]] = None
     custom_activities: Optional[List[str]] = None
@@ -224,6 +261,32 @@ class EventUpdateIn(BaseModel):
             return [str(x).strip() for x in v if str(x).strip()]
         return []
 
+    @field_validator("event_role", mode="before")
+    @classmethod
+    def _normalize_event_role(cls, v: Any):
+        if v is None:
+            return None
+
+        role = str(v).strip().upper()
+
+        if role not in {"PARTICIPANT", "VOLUNTEER"}:
+            return "PARTICIPANT"
+
+        return role
+
+    @field_validator("exclusive_group_key", mode="before")
+    @classmethod
+    def _normalize_exclusive_group_key(cls, v: Any):
+        if v is None:
+            return None
+
+        key = str(v).strip()
+
+        if not key:
+            return None
+
+        return key
+
 
 class EventOut(BaseModel):
     id: int
@@ -244,6 +307,10 @@ class EventOut(BaseModel):
     location_lng: Optional[float] = None
     geo_radius_m: Optional[int] = None
 
+    # ✅ NEW: participant/volunteer role protection
+    exclusive_group_key: Optional[str] = None
+    event_role: Optional[str] = "PARTICIPANT"
+
     activity_type_ids: List[int] = Field(default_factory=list)
     scoring_rules: List[EventScoringRuleOut] = Field(default_factory=list)
 
@@ -252,7 +319,7 @@ class EventOut(BaseModel):
     capacity: Optional[int] = None
     max_participants: Optional[int] = None
 
-    # ✅ NEW: points display (computed in /student/events)
+    # ✅ points display computed in /student/events
     points_mode: Optional[str] = None           # fixed | auto | mixed | none
     manual_points_total: Optional[int] = None
     auto_max_total: Optional[int] = None
