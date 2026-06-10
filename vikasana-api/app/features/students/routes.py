@@ -297,7 +297,7 @@ async def add_student_manual_admin(
         s = await create_student(
             db,
             payload,
-            faculty_college=payload.college,
+            faculty_college=getattr(payload, "college", None) or getattr(payload, "college_name", None) or "BNMIT",
             faculty_id=None,
         )
 

@@ -18,9 +18,11 @@ class StudentCreate(BaseModel):
     email: EmailStr | None = None
     student_type: StudentTypeStr = "REGULAR"
 
+    college: str | None = "BNMIT"
+    faculty_mentor: str | None = None
+
     passout_year: int = Field(..., ge=1990, le=2100)
     admitted_year: int = Field(..., ge=1990, le=2100)
-
 
 class StudentOut(BaseModel):
     id: int
