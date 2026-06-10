@@ -64,9 +64,7 @@ router = APIRouter(tags=["Events"])
 DEFAULT_EVENT_RADIUS_M = 500
 
 
-# =========================================================
 # ---------------------- HELPERS --------------------------
-# =========================================================
 
 def _combine_event_datetime_ist_naive(event_date: date_type, t: time_type) -> datetime:
     return datetime.combine(event_date, t).replace(tzinfo=None)
@@ -169,9 +167,7 @@ def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return R * c
 
 
-# =========================================================
 # ---------------------- ADMIN -----------------------------
-# =========================================================
 
 @router.get("/admin/events", response_model=list[EventOut])
 async def admin_list_events_api(
@@ -467,9 +463,7 @@ async def delete_role_assignment(
         "message": "Volunteer assignment removed",
         "assignment_id": assignment_id,
     }
-# =========================================================
 # ---------------------- STUDENT ---------------------------
-# =========================================================
 
 @router.get("/student/events", response_model=list[EventOut])
 async def student_events(
@@ -892,9 +886,7 @@ async def submit_event(
     return await final_submit(db, submission_id, student.id, payload.description)
 
 
-# =========================================================
 # ---------------------- ADMIN REVIEW ----------------------
-# =========================================================
 @router.get("/admin/events/{event_id}/submissions")
 async def admin_list_event_submissions(
     event_id: int,
@@ -971,8 +963,8 @@ async def admin_list_event_submissions(
             "created_at": row.created_at,
             "updated_at": None,
 
-            "description": row.description or "",
-            "points_awarded": int(row.points_awarded or 0),
+            "description": "",
+            "points_awarded": 0,
             "photo_count": int(row.photo_count or 0),
         })
 
