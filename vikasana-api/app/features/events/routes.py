@@ -665,7 +665,6 @@ async def submit_event(
 # =========================================================
 # ---------------------- ADMIN REVIEW ----------------------
 # =========================================================
-
 @router.get("/admin/events/{event_id}/submissions")
 async def admin_list_event_submissions(
     event_id: int,
@@ -673,62 +672,73 @@ async def admin_list_event_submissions(
     admin=Depends(get_current_admin),
 ):
     stmt = (
-        select(EventSubmission)
+        select(
+            EventSubmission.id.label("submission_id"),
+            EventSubmission.event_id,
+            EventSubmission.student_id,
+            Student.name.label("student_name"),
+            Student.usn.label("student_usn"),
+            Student.college.label("college"),
+            EventSubmission.status,
+            EventSubmission.submitted_at,
+            EventSubmission.created_at,
+            EventSubmission.updated_at,
+            EventSubmission.description,
+            EventSubmission.points_awarded,
+            func.count(EventSubmissionPhoto.id).label("photo_count"),
+        )
+        .outerjoin(Student, Student.id == EventSubmission.student_id)
+        .outerjoin(
+            EventSubmissionPhoto,
+            EventSubmissionPhoto.submission_id == EventSubmission.id,
+        )
         .where(EventSubmission.event_id == event_id)
+        .group_by(
+            EventSubmission.id,
+            EventSubmission.event_id,
+            EventSubmission.student_id,
+            Student.name,
+            Student.usn,
+            Student.college,
+            EventSubmission.status,
+            EventSubmission.submitted_at,
+            EventSubmission.created_at,
+            EventSubmission.updated_at,
+            EventSubmission.description,
+            EventSubmission.points_awarded,
+        )
         .order_by(EventSubmission.id.desc())
     )
 
-    rows = (await db.execute(stmt)).scalars().all()
-
-    student_ids = [
-        int(getattr(sub, "student_id"))
-        for sub in rows
-        if getattr(sub, "student_id", None) is not None
-    ]
-
-    students_by_id = {}
-
-    if student_ids:
-        student_res = await db.execute(
-            select(Student).where(Student.id.in_(student_ids))
-        )
-        students = student_res.scalars().all()
-        students_by_id = {int(st.id): st for st in students}
+    rows = (await db.execute(stmt)).all()
 
     safe_rows = []
 
-    for sub in rows:
-        sid = getattr(sub, "student_id", None)
-        student = students_by_id.get(int(sid)) if sid is not None else None
-
-        photo_count_res = await db.execute(
-            select(func.count(EventSubmissionPhoto.id)).where(
-                EventSubmissionPhoto.submission_id == sub.id
-            )
-        )
-        photo_count = int(photo_count_res.scalar() or 0)
-
-        raw_status = getattr(sub, "status", None)
-        status = raw_status.value if hasattr(raw_status, "value") else str(raw_status or "")
+    for row in rows:
+        status_val = row.status.value if hasattr(row.status, "value") else str(row.status or "")
 
         safe_rows.append({
-            "id": getattr(sub, "id", None),
-            "submission_id": getattr(sub, "id", None),
-            "event_id": getattr(sub, "event_id", None),
-            "student_id": sid,
+            "id": row.submission_id,
+            "submission_id": row.submission_id,
+            "event_id": row.event_id,
+            "student_id": row.student_id,
 
-            "student_name": getattr(student, "name", None) or "",
-            "student_usn": getattr(student, "usn", None) or "",
-            "college": getattr(student, "college", None) or "",
+            "student_name": row.student_name or "",
+            "name": row.student_name or "",
 
-            "status": status,
-            "submitted_at": getattr(sub, "submitted_at", None),
-            "created_at": getattr(sub, "created_at", None),
-            "updated_at": getattr(sub, "updated_at", None),
+            "student_usn": row.student_usn or "",
+            "usn": row.student_usn or "",
 
-            "description": getattr(sub, "description", None),
-            "points_awarded": int(getattr(sub, "points_awarded", 0) or 0),
-            "photo_count": photo_count,
+            "college": row.college or "",
+
+            "status": status_val,
+            "submitted_at": row.submitted_at,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+
+            "description": row.description or "",
+            "points_awarded": int(row.points_awarded or 0),
+            "photo_count": int(row.photo_count or 0),
         })
 
     return JSONResponse(
