@@ -674,17 +674,20 @@ async def admin_list_event_submissions(
     stmt = (
         select(
             EventSubmission.id.label("submission_id"),
-            EventSubmission.event_id,
-            EventSubmission.student_id,
+            EventSubmission.event_id.label("event_id"),
+            EventSubmission.student_id.label("student_id"),
+
             Student.name.label("student_name"),
             Student.usn.label("student_usn"),
             Student.college.label("college"),
-            EventSubmission.status,
-            EventSubmission.submitted_at,
-            EventSubmission.created_at,
-            EventSubmission.updated_at,
-            EventSubmission.description,
-            EventSubmission.points_awarded,
+
+            EventSubmission.status.label("status"),
+            EventSubmission.submitted_at.label("submitted_at"),
+            EventSubmission.created_at.label("created_at"),
+            EventSubmission.updated_at.label("updated_at"),
+            EventSubmission.description.label("description"),
+            EventSubmission.points_awarded.label("points_awarded"),
+
             func.count(EventSubmissionPhoto.id).label("photo_count"),
         )
         .outerjoin(Student, Student.id == EventSubmission.student_id)
@@ -715,7 +718,8 @@ async def admin_list_event_submissions(
     safe_rows = []
 
     for row in rows:
-        status_val = row.status.value if hasattr(row.status, "value") else str(row.status or "")
+        raw_status = row.status
+        status = raw_status.value if hasattr(raw_status, "value") else str(raw_status or "")
 
         safe_rows.append({
             "id": row.submission_id,
@@ -730,8 +734,9 @@ async def admin_list_event_submissions(
             "usn": row.student_usn or "",
 
             "college": row.college or "",
+            "college_name": row.college or "",
 
-            "status": status_val,
+            "status": status,
             "submitted_at": row.submitted_at,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
