@@ -8,6 +8,7 @@ from typing import List
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.features.events.role_guard import validate_event_role_access, can_student_view_event
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_student, get_current_admin
@@ -447,6 +448,12 @@ async def register_event(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
+    await validate_event_role_access(
+        db=db,
+        student_id=student.id,
+        event_id=event_id,
+    )
+
     return await register_for_event(db, student.id, event_id)
 
 
