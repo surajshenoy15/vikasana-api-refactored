@@ -95,7 +95,7 @@ async def login(payload: LoginRequest, db: AsyncSession) -> AdminMFAStartRespons
         mfa_token=mfa_token,
         attempts=0,
         used=False,
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
     )
 
     db.add(otp_row)
@@ -107,7 +107,7 @@ async def login(payload: LoginRequest, db: AsyncSession) -> AdminMFAStartRespons
         mfa_required=True,
         mfa_token=mfa_token,
         message="OTP sent to admin email",
-        expires_in=300,
+        expires_in=900,
     )
 
 
