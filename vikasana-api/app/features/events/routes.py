@@ -684,7 +684,7 @@ async def admin_list_event_submissions(
             EventSubmission.status.label("status"),
             EventSubmission.submitted_at.label("submitted_at"),
             EventSubmission.created_at.label("created_at"),
-            EventSubmission.updated_at.label("updated_at"),
+            
             EventSubmission.description.label("description"),
             EventSubmission.points_awarded.label("points_awarded"),
 
@@ -706,7 +706,7 @@ async def admin_list_event_submissions(
             EventSubmission.status,
             EventSubmission.submitted_at,
             EventSubmission.created_at,
-            EventSubmission.updated_at,
+            
             EventSubmission.description,
             EventSubmission.points_awarded,
         )
@@ -739,7 +739,7 @@ async def admin_list_event_submissions(
             "status": status,
             "submitted_at": row.submitted_at,
             "created_at": row.created_at,
-            "updated_at": row.updated_at,
+            "updated_at": None,
 
             "description": row.description or "",
             "points_awarded": int(row.points_awarded or 0),
