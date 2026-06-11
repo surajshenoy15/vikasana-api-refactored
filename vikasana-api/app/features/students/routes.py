@@ -350,7 +350,7 @@ async def list_students_admin(
     admitted_year: int | None = Query(None, description="Optional filter by admitted year."),
 
     # ✅ NEW: active / inactive filter
-    is_active: bool | None = Query(None, description="Optional filter: true=active, false=inactive"),
+    is_active: bool | None = Query(True, description="Optional filter: true=active, false=inactive"),
 
     limit: int | None = Query(None, ge=1, le=10000),
     offset: int = Query(0, ge=0),
@@ -872,6 +872,13 @@ async def get_student_me(
     db: AsyncSession = Depends(get_db),
     current_student: Student = Depends(get_current_student),
 ):
+    # ✅ Block deactivated / soft-deleted students
+    if getattr(current_student, "is_active", True) is False:
+        raise HTTPException(
+            status_code=403,
+            detail="Student account is inactive. Please contact admin.",
+        )
+
     stored_points = int(getattr(current_student, "total_points_earned", 0) or 0)
     required_points = int(getattr(current_student, "required_total_points", 0) or 0)
 
@@ -882,6 +889,10 @@ async def get_student_me(
         "college": getattr(current_student, "college", "") or "",
         "usn": getattr(current_student, "usn", "") or "",
         "branch": getattr(current_student, "branch", "") or "",
+
+        # ✅ Send active status to app
+        "is_active": bool(getattr(current_student, "is_active", True)),
+
         "face_enrolled": bool(getattr(current_student, "face_enrolled", False)),
         "face_enrolled_at": getattr(current_student, "face_enrolled_at", None),
         "required_total_points": required_points,
