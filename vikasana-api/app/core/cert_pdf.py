@@ -180,8 +180,7 @@ def build_certificate_body(
         [
             ("This is to inform that student ", R),
             (student_with_usn, B),
-            (" bearing this institution has actively participated in the activity ", R),
-            (event_title, B),
+            (" bearing, has actively participated in the activity ", R),
             (", organized by ", R),
             ("BNMIT", B),
             (" and ", R),
