@@ -87,7 +87,7 @@ def _draw_rich_paragraph(
     y: float,
     max_width: float,
     font_size: int = 11,
-    leading: float = 15,
+    leading: float = 17,
     first_line_indent: float = 9 * mm,
 ) -> float:
     """
@@ -109,7 +109,6 @@ def _draw_rich_paragraph(
         space_width = stringWidth(" ", font_name, font_size)
 
         allowed_width = max_width - (first_line_indent if is_first_line else 0)
-
         add_width = word_width if not current_line else word_width + space_width
 
         if current_line and current_width + add_width > allowed_width:
@@ -164,7 +163,7 @@ def build_certificate_body(
 
     student_name = _safe_text(student_name, "Student")
     usn = _safe_text(usn)
-    college_name = _safe_text(college_name, "the institution")
+    college_name = _safe_text(college_name, "this institution")
     event_title = _safe_text(event_title, "the activity")
     venue_name = _safe_text(venue_name, "the event venue")
     event_month_year = _safe_text(event_month_year, "the event period")
@@ -172,25 +171,25 @@ def build_certificate_body(
     activity_type = _safe_text(activity_type, "Social Activity")
     activity_points = int(activity_points or 0)
 
-    student_with_usn = f"{student_name} ({usn})" if usn else student_name
+    student_with_usn = f"{student_name}, USN {usn}" if usn else student_name
 
     R = "Times-Roman"
     B = "Times-Bold"
 
     return [
         [
-            ("This is to certify that Mr./Ms. ", R),
+            ("This is to inform that student ", R),
             (student_with_usn, B),
-            (" of ", R),
-            (college_name, B),
-            (" has actively participated in ", R),
+            (" bearing this institution has actively participated in the activity ", R),
             (event_title, B),
-            (", organized at ", R),
+            (", organized by ", R),
+            ("BNMIT", B),
+            (" and ", R),
+            ("Vikasana Foundation", B),
+            (" at ", R),
             (venue_name, B),
             (" in the month of ", R),
             (event_month_year, B),
-            (". This initiative was organized by ", R),
-            ("Vikasana Foundation", B),
             (".", R),
         ],
         [
@@ -204,9 +203,7 @@ def build_certificate_body(
             (". It aims to raise awareness about the importance of community participation and responsible citizenship, highlighting the role of students in contributing towards meaningful social impact and public welfare.", R),
         ],
         [
-            ("During the academic year ", R),
-            (academic_year, B),
-            (", the participant demonstrated dedication, teamwork, discipline, and active involvement, significantly contributing to the successful completion of the activity.", R),
+    ("During this period, the participant demonstrated dedication, teamwork, discipline, and active involvement, significantly contributing to the successful completion of the activity.", R),
         ],
         [
             ("In recognition of their efforts, the participant is awarded ", R),
@@ -265,13 +262,13 @@ def _make_overlay_pdf(
     c.drawString(
         20 * mm,
         top_y,
-        f"Certificate No: {certificate_no}"
+        f"Certificate No: {certificate_no}",
     )
 
     c.drawRightString(
         w - 20 * mm,
         top_y,
-        f"Date: {issue_date}"
+        f"Date: {issue_date}",
     )
 
     # -----------------------------------------------------
@@ -280,8 +277,8 @@ def _make_overlay_pdf(
     x = 20 * mm
     max_width = w - 40 * mm
 
-    # Good start point below header
-    y = h - 55 * mm
+    # Increased top spacing for balanced layout
+    y = h - 60 * mm
 
     paragraphs = build_certificate_body(
         student_name=student_name,
@@ -303,10 +300,12 @@ def _make_overlay_pdf(
             y=y,
             max_width=max_width,
             font_size=11,
-            leading=14.5,
+            leading=17,
             first_line_indent=9 * mm,
         )
-        y -= 5.5 * mm
+
+        # More paragraph spacing so content is distributed vertically
+        y -= 6.8 * mm
 
     # -----------------------------------------------------
     # QR verification - bottom left, above footer
@@ -368,7 +367,7 @@ def build_certificate_pdf(
     verify_url: str,
 
     # DB-driven fields
-    college_name: str = "the institution",
+    college_name: str = "this institution",
     event_title: str = "the activity",
     event_month_year: str = "the event period",
     academic_year: str = "the academic year",
