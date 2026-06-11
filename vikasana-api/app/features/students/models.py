@@ -64,10 +64,27 @@ class Student(Base):
     # BASIC DETAILS
     # --------------------------------------------------
 
-    college: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
-    name: Mapped[str] = mapped_column(String(120), nullable=False)
-    usn: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
-    branch: Mapped[str] = mapped_column(String(80), nullable=False)
+    college: Mapped[str] = mapped_column(
+        String(120),
+        nullable=False,
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(120),
+        nullable=False,
+    )
+
+    usn: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        index=True,
+    )
+
+    branch: Mapped[str] = mapped_column(
+        String(80),
+        nullable=False,
+    )
 
     email: Mapped[Optional[str]] = mapped_column(
         String(255),
@@ -79,6 +96,20 @@ class Student(Base):
         SAEnum(StudentType, name="student_type_enum"),
         nullable=False,
         server_default=StudentType.REGULAR.value,
+    )
+
+    # --------------------------------------------------
+    # STATUS / SOFT DELETE
+    # --------------------------------------------------
+
+    # ✅ Used instead of hard delete.
+    # This prevents certificate / submission FK errors.
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+        index=True,
     )
 
     # --------------------------------------------------
@@ -120,8 +151,19 @@ class Student(Base):
     # ACADEMIC YEARS
     # --------------------------------------------------
 
-    passout_year: Mapped[int] = mapped_column(Integer, nullable=False)
-    admitted_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    passout_year: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    admitted_year: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    # --------------------------------------------------
+    # TIMESTAMPS
+    # --------------------------------------------------
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -96,8 +96,10 @@ def _student_out(
         activities_count=int(activities_count or 0),
         certificates_count=int(certificates_count or 0),
         total_points_earned=int(s.total_points_earned or 0),
-    )
 
+        # ✅ Soft delete status
+        is_active=bool(getattr(s, "is_active", True)),
+    )
 
 def _point_item_out(item) -> StudentPointAdjustmentOut:
     return StudentPointAdjustmentOut(
@@ -338,7 +340,6 @@ async def add_students_bulk_admin(
         errors=errors,
     )
 
-
 @admin_router.get("", response_model=list[StudentOut])
 async def list_students_admin(
     q: str | None = Query(None, description="Optional search. Matches name/usn/branch/email."),
@@ -347,6 +348,10 @@ async def list_students_admin(
     branch: str | None = Query(None, description="Optional filter by branch (exact match)."),
     passout_year: int | None = Query(None, description="Optional filter by passout year."),
     admitted_year: int | None = Query(None, description="Optional filter by admitted year."),
+
+    # ✅ NEW: active / inactive filter
+    is_active: bool | None = Query(None, description="Optional filter: true=active, false=inactive"),
+
     limit: int | None = Query(None, ge=1, le=10000),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -380,6 +385,10 @@ async def list_students_admin(
         .outerjoin(activities_sq, activities_sq.c.student_id == Student.id)
         .outerjoin(certs_sq, certs_sq.c.student_id == Student.id)
     )
+
+    # ✅ NEW: filter active/inactive only when query param is passed
+    if is_active is not None:
+        stmt = stmt.where(Student.is_active == is_active)
 
     if college and college.strip():
         stmt = stmt.where(Student.college == college.strip())
@@ -426,7 +435,6 @@ async def list_students_admin(
         )
         for (s, activities_count, certificates_count) in rows
     ]
-
 @admin_router.get("/{student_id}/face-enrollment")
 async def get_student_face_enrollment_details(
     student_id: int,
@@ -633,15 +641,17 @@ async def delete_student_admin(
     if not s:
         raise HTTPException(status_code=404, detail="Student not found")
 
-    await db.delete(s)
+    # ✅ Soft delete / deactivate student
+    s.is_active = False
+
     await db.commit()
+    await db.refresh(s)
 
     return {
         "success": True,
-        "message": "Student deleted successfully",
+        "message": "Student deactivated successfully",
         "student_id": student_id,
     }
-
 @admin_router.patch("/{student_id}/points")
 async def update_student_points_admin(
     student_id: int,

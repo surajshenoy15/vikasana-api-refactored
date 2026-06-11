@@ -24,6 +24,7 @@ class StudentCreate(BaseModel):
     passout_year: int = Field(..., ge=1990, le=2100)
     admitted_year: int = Field(..., ge=1990, le=2100)
 
+
 class StudentOut(BaseModel):
     id: int
     name: str
@@ -42,8 +43,10 @@ class StudentOut(BaseModel):
     activities_count: int = 0
     certificates_count: int = 0
 
-    # ✅ add this
     total_points_earned: int = 0
+
+    # ✅ Soft delete status
+    is_active: bool = True
 
     model_config = {"from_attributes": True}
 
