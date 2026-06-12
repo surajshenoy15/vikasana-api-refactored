@@ -87,8 +87,10 @@ async def dashboard_stats(
     visible_event_conditions = _event_visible_conditions()
 
     total_students = (
-        await db.execute(select(func.count(Student.id)))
-    ).scalar() or 0
+        await db.execute(
+            select(func.count(Student.id)).where(Student.is_active == True)
+    )
+).scalar() or 0
 
     try:
         active_students = (
