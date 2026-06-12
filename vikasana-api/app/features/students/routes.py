@@ -641,17 +641,55 @@ async def delete_student_admin(
     if not s:
         raise HTTPException(status_code=404, detail="Student not found")
 
-    # ✅ Soft delete / deactivate student
-    s.is_active = False
+    try:
+        # Delete linked certificates first because certificates.student_id references students.id
+        await db.execute(
+            delete(Certificate).where(Certificate.student_id == student_id)
+        )
 
-    await db.commit()
-    await db.refresh(s)
+        # Delete event submissions linked to student
+        await db.execute(
+            delete(EventSubmission).where(EventSubmission.student_id == student_id)
+        )
 
-    return {
-        "success": True,
-        "message": "Student deactivated successfully",
-        "student_id": student_id,
-    }
+        # Delete activity sessions linked to student
+        await db.execute(
+            delete(ActivitySession).where(ActivitySession.student_id == student_id)
+        )
+
+        # Delete face enrollment images
+        await db.execute(
+            delete(StudentFaceEnrollmentImage).where(
+                StudentFaceEnrollmentImage.student_id == student_id
+            )
+        )
+
+        # Delete face embeddings
+        await db.execute(
+            delete(StudentFaceEmbedding).where(
+                StudentFaceEmbedding.student_id == student_id
+            )
+        )
+
+        # Finally delete student permanently
+        await db.execute(
+            delete(Student).where(Student.id == student_id)
+        )
+
+        await db.commit()
+
+        return {
+            "success": True,
+            "message": "Student permanently deleted successfully",
+            "student_id": student_id,
+        }
+
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete student permanently: {str(e)}",
+        )
 @admin_router.patch("/{student_id}/points")
 async def update_student_points_admin(
     student_id: int,
