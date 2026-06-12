@@ -1,7 +1,4 @@
-# app/controllers/student_controller.py
-# ✅ Fully updated controller (safe + consistent with your updated routes)
-# - Fixes the wrong call pattern you had in routes (current_faculty=...) by keeping signature as (faculty_college, faculty_id)
-# - Adds small robustness: safe email normalization, handles missing email header properly, avoids "row.get('')" edge
+# app/features/students/service.py
 
 import os
 import csv
@@ -32,6 +29,46 @@ def _parse_student_type(v: str) -> StudentType:
 def _required_points_for_type(stype: StudentType) -> int:
     return 60 if stype == StudentType.DIPLOMA else 100
 
+
+def _is_active_student(s: Student) -> bool:
+    return bool(getattr(s, "is_active", True))
+
+
+def _reactivate_student(
+    s: Student,
+    *,
+    college: str,
+    name: str,
+    email: str,
+    usn: str,
+    branch: str,
+    student_type: StudentType,
+    passout_year: int,
+    admitted_year: int,
+    faculty_id: int | None,
+) -> Student:
+    """
+    Permanent fix:
+    If admin previously deleted/deactivated a student, CSV/manual add should restore
+    that same row instead of creating duplicate or skipping it.
+    """
+    s.is_active = True
+    s.college = college
+    s.name = name
+    s.email = email
+    s.usn = usn
+    s.branch = branch
+    s.student_type = student_type
+    s.required_total_points = _required_points_for_type(student_type)
+    s.passout_year = passout_year
+    s.admitted_year = admitted_year
+    s.created_by_faculty_id = faculty_id
+
+    # Do NOT reset earned points/certificates here.
+    # Old activity/certificate history remains attached to the same student id.
+    return s
+
+
 def _trigger_student_welcome_email(email: str | None, name: str | None):
     if not email:
         return
@@ -55,23 +92,17 @@ def _trigger_student_welcome_email(email: str | None, name: str | None):
     except RuntimeError:
         print(f"[WARN] Could not schedule welcome email for {email}")
 
+
 def _coerce_student_type(v) -> StudentType:
-    """
-    Accepts: StudentType enum OR string like 'REGULAR'/'DIPLOMA'
-    """
     if isinstance(v, StudentType):
         return v
     return _parse_student_type(str(v))
 
 
 def _normalize_csv_headers(fieldnames: list[str] | None) -> tuple[dict[str, str], set[str]]:
-    """
-    Returns:
-      field_map: normalized_lower_header -> original_header
-      headers: set of normalized_lower_header
-    """
     if not fieldnames:
         return {}, set()
+
     field_map = {h.strip().lower(): h for h in fieldnames if h and h.strip()}
     return field_map, set(field_map.keys())
 
@@ -81,58 +112,87 @@ async def create_student(
     payload: StudentCreate,
     *,
     faculty_college: str,
-    faculty_id: int | None = None,  # ✅ mentor id
+    faculty_id: int | None = None,
 ) -> Student:
     faculty_college = (faculty_college or "").strip()
+
     if not faculty_college:
         raise ValueError("Faculty college is missing. Please set faculty.college.")
 
-    usn = payload.usn.strip()
+    name = payload.name.strip()
+    usn = payload.usn.strip().upper()
+    branch = payload.branch.strip()
     email = str(payload.email).strip().lower() if payload.email else None
-
-    # ✅ Duplicate check within same college (USN or Email)
-    dup_stmt = select(Student).where(
-        Student.college == faculty_college,
-        or_(
-            Student.usn == usn,
-            Student.email == email if email else False,
-        ),
-    )
-    existing = (await db.execute(dup_stmt)).scalar_one_or_none()
-    if existing:
-        if existing.usn == usn:
-            raise ValueError(f"Duplicate USN in this college: {usn}")
-        raise ValueError(f"Duplicate Email in this college: {email}")
-
     stype = _coerce_student_type(payload.student_type)
     required_points = _required_points_for_type(stype)
 
+    dup_stmt = (
+        select(Student)
+        .where(
+            Student.college == faculty_college,
+            or_(
+                Student.usn == usn,
+                Student.email == email if email else False,
+            ),
+        )
+        .order_by(Student.id.asc())
+    )
+
+    existing_students = (await db.execute(dup_stmt)).scalars().all()
+
+    active_existing = next((s for s in existing_students if _is_active_student(s)), None)
+    inactive_existing = next((s for s in existing_students if not _is_active_student(s)), None)
+
+    if active_existing:
+        if active_existing.usn == usn:
+            raise ValueError(f"Duplicate USN in this college: {usn}")
+        raise ValueError(f"Duplicate Email in this college: {email}")
+
+    # ✅ Permanent fix: restore deleted/deactivated student
+    if inactive_existing:
+        _reactivate_student(
+            inactive_existing,
+            college=faculty_college,
+            name=name,
+            email=email,
+            usn=usn,
+            branch=branch,
+            student_type=stype,
+            passout_year=payload.passout_year,
+            admitted_year=payload.admitted_year,
+            faculty_id=faculty_id,
+        )
+
+        await db.commit()
+        await db.refresh(inactive_existing)
+
+        _trigger_student_welcome_email(inactive_existing.email, inactive_existing.name)
+
+        return inactive_existing
+
     s = Student(
-        college=faculty_college,  # ✅ enforced
-        name=payload.name.strip(),
+        college=faculty_college,
+        name=name,
         usn=usn,
-        branch=payload.branch.strip(),
+        branch=branch,
         email=email,
         student_type=stype,
-
-        # ✅ Activity Tracker fields
         required_total_points=required_points,
         total_points_earned=0,
-
         passout_year=payload.passout_year,
         admitted_year=payload.admitted_year,
-
-        # ✅ Mentor
         created_by_faculty_id=faculty_id,
+        is_active=True,
     )
+
     db.add(s)
     await db.commit()
     await db.refresh(s)
 
-    # ✅ Welcome email (non-blocking)
     _trigger_student_welcome_email(s.email, s.name)
 
     return s
+
 
 async def create_students_from_csv(
     db: AsyncSession,
@@ -148,8 +208,13 @@ async def create_students_from_csv(
     Faculty upload CSV:
       name,email,usn,branch,student_type,admitted_year,passout_year
 
-    Admin Green Circuit upload CSV:
+    Admin upload CSV:
       name,email,usn,branch,college,student_type,admitted_year,passout_year,faculty_email
+
+    Permanent duplicate behavior:
+      - Active existing student => skip / duplicate
+      - Inactive existing student => reactivate and update details
+      - No existing student => insert new row
     """
 
     default_college = (faculty_college or "").strip()
@@ -168,7 +233,16 @@ async def create_students_from_csv(
     reader = csv.DictReader(io.StringIO(text))
 
     if not reader.fieldnames:
-        return (0, 0, 0, 0, ["CSV has no headers. Required: name,email,usn,branch,student_type,admitted_year,passout_year"])
+        return (
+            0,
+            0,
+            0,
+            0,
+            [
+                "CSV has no headers. Required: "
+                "name,email,usn,branch,student_type,admitted_year,passout_year"
+            ],
+        )
 
     field_map, headers = _normalize_csv_headers(reader.fieldnames)
 
@@ -178,30 +252,42 @@ async def create_students_from_csv(
         required.add("college")
 
     missing = required - headers
+
     if missing:
         return (0, 0, 0, 0, [f"Missing headers: {', '.join(sorted(missing))}"])
 
     rows = list(reader)
     total_rows = len(rows)
 
-    # Preload existing students for duplicate check
-    existing_rows = (
-        await db.execute(select(Student.college, Student.usn, Student.email))
-    ).all()
+    # ✅ Permanent fix: preload full Student objects, not only email/usn.
+    # We must know active vs inactive.
+    existing_students = (await db.execute(select(Student))).scalars().all()
 
-    existing_usns = {
-        (str(college or "").strip().lower(), str(usn or "").strip().upper())
-        for college, usn, email in existing_rows
-        if college and usn
-    }
+    active_usns: set[tuple[str, str]] = set()
+    active_emails: set[tuple[str, str]] = set()
 
-    existing_emails = {
-        (str(college or "").strip().lower(), str(email or "").strip().lower())
-        for college, usn, email in existing_rows
-        if college and email
-    }
+    inactive_by_usn: dict[tuple[str, str], Student] = {}
+    inactive_by_email: dict[tuple[str, str], Student] = {}
 
-    # Preload faculty by email for admin multi-college upload
+    for s in existing_students:
+        college_key = str(getattr(s, "college", "") or "").strip().lower()
+        usn_key = str(getattr(s, "usn", "") or "").strip().upper()
+        email_key = str(getattr(s, "email", "") or "").strip().lower()
+
+        if not college_key:
+            continue
+
+        if _is_active_student(s):
+            if usn_key:
+                active_usns.add((college_key, usn_key))
+            if email_key:
+                active_emails.add((college_key, email_key))
+        else:
+            if usn_key:
+                inactive_by_usn.setdefault((college_key, usn_key), s)
+            if email_key:
+                inactive_by_email.setdefault((college_key, email_key), s)
+
     faculty_by_email = {}
 
     if allow_csv_faculty_email and "faculty_email" in headers:
@@ -223,6 +309,7 @@ async def create_students_from_csv(
             admitted_year = int(_clean(row.get(field_map["admitted_year"], "")))
 
             stype_raw = ""
+
             if "student_type" in headers:
                 stype_raw = _clean(row.get(field_map["student_type"], "")).upper()
 
@@ -247,7 +334,6 @@ async def create_students_from_csv(
 
                     row_faculty_id = faculty.id
 
-                    # If college is blank in future, use faculty college
                     if not row_college:
                         row_college = faculty.college
 
@@ -258,18 +344,52 @@ async def create_students_from_csv(
             usn_key = usn.strip().upper()
             email_key = email.strip().lower()
 
-            dup = (
-                (college_key, usn_key) in existing_usns
-                or (college_key, email_key) in existing_emails
+            active_dup = (
+                (college_key, usn_key) in active_usns
+                or (college_key, email_key) in active_emails
             )
 
-            if dup:
+            if active_dup:
                 if skip_duplicates:
                     skipped += 1
                     continue
+
                 raise ValueError("Duplicate USN/email in this college")
 
             stype = _parse_student_type(stype_raw)
+
+            # ✅ Permanent fix:
+            # If same USN/email exists but inactive, restore that student instead of skipping.
+            inactive_student = (
+                inactive_by_usn.get((college_key, usn_key))
+                or inactive_by_email.get((college_key, email_key))
+            )
+
+            if inactive_student:
+                _reactivate_student(
+                    inactive_student,
+                    college=row_college,
+                    name=name,
+                    email=email,
+                    usn=usn,
+                    branch=branch,
+                    student_type=stype,
+                    passout_year=passout_year,
+                    admitted_year=admitted_year,
+                    faculty_id=row_faculty_id,
+                )
+
+                inserted += 1
+
+                active_usns.add((college_key, usn_key))
+                active_emails.add((college_key, email_key))
+
+                inactive_by_usn.pop((college_key, usn_key), None)
+                inactive_by_email.pop((college_key, email_key), None)
+
+                welcome_targets.append((email, name))
+                continue
+
             required_points = _required_points_for_type(stype)
 
             s = Student(
@@ -284,13 +404,15 @@ async def create_students_from_csv(
                 passout_year=passout_year,
                 admitted_year=admitted_year,
                 created_by_faculty_id=row_faculty_id,
+                is_active=True,
             )
 
             db.add(s)
             inserted += 1
 
-            existing_usns.add((college_key, usn_key))
-            existing_emails.add((college_key, email_key))
+            active_usns.add((college_key, usn_key))
+            active_emails.add((college_key, email_key))
+
             welcome_targets.append((email, name))
 
         except Exception as e:
@@ -299,7 +421,6 @@ async def create_students_from_csv(
 
     await db.commit()
 
-    # Send welcome emails only for inserted rows
     for email, name in welcome_targets:
         _trigger_student_welcome_email(email, name)
 
