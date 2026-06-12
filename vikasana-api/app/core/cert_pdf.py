@@ -220,7 +220,6 @@ def build_certificate_body(
 # ---------------------------------------------------------
 # Overlay PDF
 # ---------------------------------------------------------
-
 def _make_overlay_pdf(
     *,
     certificate_no: str,
@@ -252,20 +251,21 @@ def _make_overlay_pdf(
 
     # -----------------------------------------------------
     # Certificate No + Date
+    # Moved down to avoid overlapping Vikasana logo/header.
     # -----------------------------------------------------
-    top_y = h - 35 * mm
+    top_y = h - 44 * mm
 
     c.setFillColor(black)
-    c.setFont("Times-Roman", 11)
+    c.setFont("Times-Roman", 10.5)
 
     c.drawString(
-        20 * mm,
+        18 * mm,
         top_y,
         f"Certificate No: {certificate_no}",
     )
 
     c.drawRightString(
-        w - 20 * mm,
+        w - 18 * mm,
         top_y,
         f"Date: {issue_date}",
     )
@@ -276,8 +276,8 @@ def _make_overlay_pdf(
     x = 20 * mm
     max_width = w - 40 * mm
 
-    # Increased top spacing for balanced layout
-    y = h - 60 * mm
+    # Adjusted slightly down because cert no/date moved down
+    y = h - 70 * mm
 
     paragraphs = build_certificate_body(
         student_name=student_name,
@@ -303,16 +303,16 @@ def _make_overlay_pdf(
             first_line_indent=9 * mm,
         )
 
-        # More paragraph spacing so content is distributed vertically
         y -= 6.8 * mm
 
     # -----------------------------------------------------
-    # QR verification - bottom left, above footer
+    # QR verification
+    # Moved upward so it does not touch the footer/contact area.
     # -----------------------------------------------------
     if verify_url:
-        qr_size = 24 * mm
-        qr_x = 20 * mm
-        qr_y = 26 * mm
+        qr_size = 22 * mm
+        qr_x = 18 * mm
+        qr_y = 34 * mm
 
         qr_img = _make_qr_image(verify_url)
 
@@ -327,11 +327,18 @@ def _make_overlay_pdf(
 
         c.setFont("Times-Roman", 7)
         c.setFillColor(HexColor("#333333"))
-        c.drawString(qr_x, qr_y - 4 * mm, "Scan QR to verify")
+
+        label = "Scan QR to verify"
+        label_width = stringWidth(label, "Times-Roman", 7)
+
+        c.drawString(
+            qr_x + (qr_size - label_width) / 2,
+            qr_y - 4 * mm,
+            label,
+        )
 
     # -----------------------------------------------------
     # Small digital verification signature
-    # Keep it tiny. Do not disturb template design.
     # -----------------------------------------------------
     if signature:
         c.setFont("Times-Roman", 5)
@@ -343,12 +350,10 @@ def _make_overlay_pdf(
         if len(sig_text) > max_sig_chars:
             sig_text = sig_text[:max_sig_chars] + "..."
 
-        c.drawString(20 * mm, 18 * mm, sig_text)
+        c.drawString(18 * mm, 20 * mm, sig_text)
 
     c.save()
     return buf.getvalue()
-
-
 # ---------------------------------------------------------
 # Public function
 # ---------------------------------------------------------
