@@ -14,18 +14,21 @@ from app.features.students.models import Student
 from app.features.activities.models import ActivityType
 from app.features.events.models import Event, EventSubmission
 
-from app.core.cert_storage import presign_certificate_download_url  # ✅ you already have this
+from app.core.cert_storage import presign_certificate_download_url
 
 router = APIRouter(prefix="/admin/certificates", tags=["Admin - Certificates"])
 
 
 @router.get("")
 async def list_certificates(
-    limit: int = Query(500, ge=1, le=2000),
+    limit: int = Query(6000, ge=1, le=6000),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
+    safe_limit = min(int(limit or 6000), 6000)
+    safe_offset = max(int(offset or 0), 0)
+
     total = (await db.execute(select(func.count(Certificate.id)))).scalar() or 0
 
     stmt = (
@@ -43,8 +46,8 @@ async def list_certificates(
         .join(ActivityType, ActivityType.id == Certificate.activity_type_id)
         .join(Event, Event.id == Certificate.event_id)
         .order_by(Certificate.issued_at.desc(), Certificate.id.desc())
-        .limit(limit)
-        .offset(offset)
+        .limit(safe_limit)
+        .offset(safe_offset)
     )
 
     rows = (await db.execute(stmt)).all()
@@ -59,7 +62,7 @@ async def list_certificates(
                 "category": r.category,
                 "title": r.event_title or "Event",
                 "submittedOn": r.issued_at.isoformat() if r.issued_at else None,
-                "pdf_url": None,  # keep null; download via /{id}/download-url
+                "pdf_url": None,
             }
         )
 
@@ -68,11 +71,12 @@ async def list_certificates(
 
 @router.get("/student-progress")
 async def student_progress(
-    limit: int = Query(60, ge=1, le=500),
+    limit: int = Query(6000, ge=1, le=6000),
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    # activities = total event submissions
+    safe_limit = min(int(limit or 6000), 6000)
+
     sub_stmt = (
         select(
             Student.id.label("id"),
@@ -84,8 +88,9 @@ async def student_progress(
         .join(EventSubmission, EventSubmission.student_id == Student.id, isouter=True)
         .group_by(Student.id, Student.name, Student.college)
         .order_by(func.count(EventSubmission.id).desc())
-        .limit(limit)
+        .limit(safe_limit)
     )
+
     subs = (await db.execute(sub_stmt)).all()
     student_ids = [r.id for r in subs]
 
@@ -114,26 +119,6 @@ async def student_progress(
     return {"students": students}
 
 
-@router.get("/{certificate_id}/download-url")
-async def certificate_download_url(
-    certificate_id: int,
-    db: AsyncSession = Depends(get_db),
-    admin=Depends(get_current_admin),
-):
-    cert = (
-        await db.execute(select(Certificate).where(Certificate.id == certificate_id))
-    ).scalar_one_or_none()
-
-    if not cert:
-        raise HTTPException(status_code=404, detail="Certificate not found")
-
-    if not cert.pdf_path:
-        raise HTTPException(status_code=400, detail="Certificate PDF not generated")
-
-    url = presign_certificate_download_url(cert.pdf_path)
-    return {"url": url}
-
-
 @router.get("/export")
 async def export_certificates_csv(
     db: AsyncSession = Depends(get_db),
@@ -160,7 +145,17 @@ async def export_certificates_csv(
 
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["certificate_no", "issued_at", "student", "usn", "college", "event", "activity_type"])
+    w.writerow(
+        [
+            "certificate_no",
+            "issued_at",
+            "student",
+            "usn",
+            "college",
+            "event",
+            "activity_type",
+        ]
+    )
 
     for r in rows:
         w.writerow(
@@ -181,3 +176,23 @@ async def export_certificates_csv(
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=certificates.csv"},
     )
+
+
+@router.get("/{certificate_id}/download-url")
+async def certificate_download_url(
+    certificate_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    cert = (
+        await db.execute(select(Certificate).where(Certificate.id == certificate_id))
+    ).scalar_one_or_none()
+
+    if not cert:
+        raise HTTPException(status_code=404, detail="Certificate not found")
+
+    if not cert.pdf_path:
+        raise HTTPException(status_code=400, detail="Certificate PDF not generated")
+
+    url = presign_certificate_download_url(cert.pdf_path)
+    return {"url": url}
