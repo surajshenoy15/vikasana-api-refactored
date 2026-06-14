@@ -42,7 +42,7 @@ async def list_sessions(
         None,
         description="Search by activity name or session code",
     ),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(6000, ge=1, le=6000),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),

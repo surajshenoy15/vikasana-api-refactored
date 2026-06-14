@@ -170,7 +170,7 @@ async def admin_list_sessions(
     status: Optional[ActivitySessionStatus] = None,
     include_all: bool = False,
     q: Optional[str] = None,
-    limit: int = 50,
+    limit: int = 6000,
     offset: int = 0,
 ) -> list[dict]:
     """
@@ -180,6 +180,11 @@ async def admin_list_sessions(
     - Else if status is None -> Queue: SUBMITTED + FLAGGED
     - Else -> exact status filter
     """
+
+    # ✅ allow up to 6000 records safely
+    safe_limit = min(int(limit or 6000), 6000)
+    safe_offset = max(int(offset or 0), 0)
+
     stmt = (
         select(ActivitySession)
         .options(selectinload(ActivitySession.photos))
@@ -187,8 +192,8 @@ async def admin_list_sessions(
             ActivitySession.submitted_at.desc().nulls_last(),
             ActivitySession.id.desc(),
         )
-        .limit(limit)
-        .offset(offset)
+        .limit(safe_limit)
+        .offset(safe_offset)
     )
 
     if not include_all:
