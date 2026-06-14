@@ -53,6 +53,7 @@ from app.features.events.service import (
     end_event,
     list_student_event_certificates,
     regenerate_event_certificates,
+    generate_missing_event_certificates_batch, 
     auto_approve_event_from_sessions,
     get_student_event_draft_progress,
     _ensure_event_window,
@@ -284,6 +285,18 @@ PRIVATE_MEDIA_BUCKETS = {
     "vikasana-certificates",
 }
 
+@router.post("/admin/events/{event_id}/certificates/generate-batch")
+async def admin_generate_event_certificates_batch(
+    event_id: int,
+    limit: int = Query(100, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    return await generate_missing_event_certificates_batch(
+        db=db,
+        event_id=event_id,
+        limit=limit,
+    )
 
 @router.get("/admin/media/presign")
 async def admin_presign_private_media(

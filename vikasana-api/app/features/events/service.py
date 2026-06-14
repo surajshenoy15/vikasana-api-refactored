@@ -1324,6 +1324,242 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
     await db.commit()
     return issued
+
+async def generate_missing_event_certificates_batch(
+    db: AsyncSession,
+    event_id: int,
+    limit: int = 100,
+) -> dict:
+    """
+    Generate only missing certificates in small batches.
+
+    This avoids browser/API timeout for large events like 1000+ participants.
+    Does NOT delete existing certificates.
+    """
+
+    event = await db.get(Event, event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    limit = min(max(int(limit or 100), 1), 200)
+
+    start_utc, end_utc = _event_window_utc(event)
+    if end_utc <= start_utc:
+        end_utc = start_utc + timedelta(hours=6)
+
+    mapped_ids = await _get_event_activity_type_ids(db, event.id)
+    activity_type_ids = sorted({int(x) for x in mapped_ids if x is not None})
+
+    if not activity_type_ids:
+        activity_type_ids = await _infer_activity_type_ids_from_sessions(
+            db,
+            start_utc,
+            end_utc,
+        )
+
+    if not activity_type_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="No activity types found for this event.",
+        )
+
+    # Get approved submissions which do not already have certs for all activity types
+    sub_q = await db.execute(
+        select(EventSubmission)
+        .where(
+            EventSubmission.event_id == event.id,
+            func.lower(cast(EventSubmission.status, String)) == "approved",
+        )
+        .order_by(EventSubmission.id.asc())
+    )
+
+    submissions = sub_q.scalars().all()
+
+    if not submissions:
+        raise HTTPException(
+            status_code=400,
+            detail="No approved students found for this event.",
+        )
+
+    now_utc = datetime.now(timezone.utc)
+    now_ist = _now_ist_aware()
+    academic_year = _academic_year_from_date(now_ist)
+
+    venue_name = (
+        getattr(event, "venue_name", None)
+        or getattr(event, "venue", None)
+        or getattr(event, "location", None)
+        or ""
+    ).strip() or "N/A"
+
+    at_q = await db.execute(
+        select(ActivityType).where(ActivityType.id.in_(activity_type_ids))
+    )
+    at_by_id = {int(a.id): a for a in at_q.scalars().all()}
+
+    student_ids = sorted(
+        {int(s.student_id) for s in submissions if s.student_id is not None}
+    )
+
+    st_q = await db.execute(select(Student).where(Student.id.in_(student_ids)))
+    student_by_id = {int(s.id): s for s in st_q.scalars().all()}
+
+    async def _hours_in_window(student_id: int, at_id: int) -> float:
+        session_end = func.coalesce(
+            ActivitySession.expires_at,
+            ActivitySession.submitted_at,
+            end_utc,
+        )
+
+        hrs_q = await db.execute(
+            select(
+                func.coalesce(
+                    func.sum(
+                        func.greatest(
+                            0.0,
+                            func.extract(
+                                "epoch",
+                                (
+                                    func.least(session_end, end_utc)
+                                    - func.greatest(ActivitySession.started_at, start_utc)
+                                ),
+                            ) / 3600.0,
+                        )
+                    ),
+                    0.0,
+                )
+            ).where(
+                ActivitySession.student_id == student_id,
+                ActivitySession.activity_type_id == at_id,
+                func.lower(cast(ActivitySession.status, String)) == "approved",
+                ActivitySession.started_at <= end_utc,
+                session_end >= start_utc,
+            )
+        )
+
+        return float(hrs_q.scalar() or 0.0)
+
+    issued = 0
+    skipped_existing = 0
+    skipped_no_hours = 0
+
+    for sub in submissions:
+        if issued >= limit:
+            break
+
+        if sub.student_id is None:
+            continue
+
+        student = student_by_id.get(int(sub.student_id))
+        if not student:
+            continue
+
+        student_name = (getattr(student, "name", None) or "Student").strip()
+        usn = (getattr(student, "usn", None) or "").strip()
+
+        for at_id in activity_type_ids:
+            if issued >= limit:
+                break
+
+            at_id = int(at_id)
+
+            existing_q = await db.execute(
+                select(Certificate.id).where(
+                    Certificate.submission_id == sub.id,
+                    Certificate.activity_type_id == at_id,
+                )
+            )
+
+            if existing_q.scalar_one_or_none():
+                skipped_existing += 1
+                continue
+
+            hours = await _hours_in_window(int(sub.student_id), at_id)
+
+            if hours <= 0:
+                skipped_no_hours += 1
+                continue
+
+            at = at_by_id.get(at_id)
+            activity_type_name = (
+                getattr(at, "name", None) or ""
+            ).strip() or f"Activity Type #{at_id}"
+
+            points_awarded = await _certificate_points_for_event_activity(
+                db=db,
+                event_id=event.id,
+                at=at,
+                at_id=at_id,
+                hours=hours,
+            )
+
+            cert_no = await _next_certificate_no(db, academic_year, now_ist)
+
+            cert = Certificate(
+                certificate_no=cert_no,
+                submission_id=sub.id,
+                student_id=sub.student_id,
+                event_id=event.id,
+                activity_type_id=at_id,
+                issued_at=now_utc,
+            )
+
+            db.add(cert)
+            await db.flush()
+
+            sig = sign_cert(cert.certificate_no)
+            verify_url = (
+                f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify"
+                f"?cert_id={quote(cert.certificate_no)}&sig={quote(sig)}"
+            )
+
+            pdf_bytes = build_certificate_pdf(
+                template_pdf_path=settings.CERT_TEMPLATE_PDF_PATH,
+                certificate_no=cert.certificate_no,
+                issue_date=(
+                    cert.issued_at.date().isoformat()
+                    if cert.issued_at
+                    else now_ist.date().isoformat()
+                ),
+                student_name=student_name,
+                usn=usn,
+                activity_type=activity_type_name,
+                venue_name=venue_name,
+                activity_points=int(points_awarded),
+                verify_url=verify_url,
+            )
+
+            object_key = upload_certificate_pdf_bytes(cert.id, pdf_bytes)
+            cert.pdf_path = object_key
+
+            issued += 1
+
+    await db.commit()
+
+    remaining_q = await db.execute(
+        select(func.count(EventSubmission.id))
+        .where(
+            EventSubmission.event_id == event.id,
+            func.lower(cast(EventSubmission.status, String)) == "approved",
+        )
+    )
+
+    approved_total = int(remaining_q.scalar() or 0)
+
+    return {
+        "event_id": event_id,
+        "batch_limit": limit,
+        "certificates_issued_now": issued,
+        "approved_submissions_total": approved_total,
+        "skipped_existing": skipped_existing,
+        "skipped_no_hours": skipped_no_hours,
+        "done": issued == 0,
+        "message": (
+            "Batch generated. Run again until certificates_issued_now becomes 0."
+            if issued > 0
+            else "No more missing certificates found."
+        ),
+    }
 # =========================================================
 # ---------------------- CERT LIST (STUDENT) ----------------
 # =========================================================
