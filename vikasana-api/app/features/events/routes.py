@@ -464,7 +464,6 @@ async def delete_role_assignment(
         "assignment_id": assignment_id,
     }
 # ---------------------- STUDENT ---------------------------
-
 @router.get("/student/events", response_model=list[EventOut])
 async def student_events(
     db: AsyncSession = Depends(get_db),
@@ -472,7 +471,7 @@ async def student_events(
 ):
     events = await list_active_events(db)
 
-    # ✅ NEW: hide wrong-role events
+    # ✅ Hide wrong-role events
     # - Volunteers see only VOLUNTEER event for the same group
     # - Normal students see only PARTICIPANT event
     visible_events = []
@@ -488,59 +487,85 @@ async def student_events(
             visible_events.append(ev)
 
     events = visible_events
-
     event_ids = [ev.id for ev in events]
 
-    # registered counts
+    # ✅ Registered counts
     registered_count_map: dict[int, int] = {}
+
     if event_ids:
         count_rows = await db.execute(
             select(
                 EventSubmission.event_id,
-                func.count(func.distinct(EventSubmission.student_id)).label("registered_count"),
+                func.count(func.distinct(EventSubmission.student_id)).label(
+                    "registered_count"
+                ),
             )
             .where(EventSubmission.event_id.in_(event_ids))
             .group_by(EventSubmission.event_id)
         )
-        registered_count_map = {int(eid): int(c or 0) for eid, c in count_rows.all()}
 
-    # ── Load ActivityType caps/rates for AUTO points ──
+        registered_count_map = {
+            int(eid): int(c or 0)
+            for eid, c in count_rows.all()
+        }
+
+    # ✅ Load ActivityType caps/rates for AUTO points
     at_map: dict[int, ActivityType] = {}
     all_at_ids: set[int] = set()
     items: list[dict] = []
 
     for ev in events:
-        it = _event_out_dict(ev)
-        for r in it.get("scoring_rules", []):
-            if r.get("activity_type_id") is not None:
-                all_at_ids.add(int(r["activity_type_id"]))
-        items.append(it)
+        item = _event_out_dict(ev)
+
+        for rule in item.get("scoring_rules", []):
+            if rule.get("activity_type_id") is not None:
+                all_at_ids.add(int(rule["activity_type_id"]))
+
+        items.append(item)
 
     if all_at_ids:
-        at_rows = await db.execute(select(ActivityType).where(ActivityType.id.in_(all_at_ids)))
-        at_map = {int(a.id): a for a in at_rows.scalars().all()}
+        at_rows = await db.execute(
+            select(ActivityType).where(ActivityType.id.in_(all_at_ids))
+        )
+        at_map = {
+            int(activity_type.id): activity_type
+            for activity_type in at_rows.scalars().all()
+        }
 
     def _points_for(item: dict) -> dict:
         rules = item.get("scoring_rules", []) or []
+
         manual_total = 0
         auto_max_total = 0
         has_manual = False
         has_auto = False
         min_hours = 0.0
 
-        for r in rules:
-            mode = str(r.get("score_mode") or "AUTO").upper()
-            mh = float(r.get("min_required_hours") or 0)
-            min_hours = max(min_hours, mh)
+        for rule in rules:
+            mode = str(rule.get("score_mode") or "AUTO").upper()
+            required_hours = float(rule.get("min_required_hours") or 0)
+            min_hours = max(min_hours, required_hours)
 
             if mode == "MANUAL":
                 has_manual = True
-                manual_total += int(r.get("manual_points") or 0)
+                manual_total += int(rule.get("manual_points") or 0)
             else:
                 has_auto = True
-                at = at_map.get(int(r["activity_type_id"])) if r.get("activity_type_id") else None
-                mp = int(getattr(at, "max_points", 0) or 0) if at else 0
-                auto_max_total += mp
+
+                activity_type_id = rule.get("activity_type_id")
+                activity_type = (
+                    at_map.get(int(activity_type_id))
+                    if activity_type_id is not None
+                    else None
+                )
+
+                max_points = (
+                    int(getattr(activity_type, "max_points", 0) or 0)
+                    if activity_type
+                    else 0
+                )
+
+                auto_max_total += max_points
 
         if has_manual and has_auto:
             mode = "mixed"
@@ -554,10 +579,18 @@ async def student_events(
         if mode == "fixed":
             display = f"+{manual_total} pts"
         elif mode == "auto":
-            display = f"Up to {auto_max_total} pts" if auto_max_total > 0 else "Based on hours"
+            display = (
+                f"Up to {auto_max_total} pts"
+                if auto_max_total > 0
+                else "Based on hours"
+            )
         elif mode == "mixed":
             display = f"+{manual_total} pts"
-            display += f" · up to +{auto_max_total}" if auto_max_total > 0 else " + hours-based"
+            display += (
+                f" · up to +{auto_max_total}"
+                if auto_max_total > 0
+                else " + hours-based"
+            )
         else:
             display = "—"
 
@@ -574,9 +607,16 @@ async def student_events(
     result = []
 
     for ev, item in zip(events, items):
-        item["registered_count"] = registered_count_map.get(ev.id, 0)
-        item["max_participants"] = getattr(ev, "max_participants", None) or 100
-        item["capacity"] = item.get("max_participants") or 100
+        registered_count = registered_count_map.get(ev.id, 0)
+
+        # ✅ events table has no max_participants column.
+        # Old fallback was 100, which made 116 registered show as "Full".
+        max_participants = getattr(ev, "max_participants", None) or 6000
+
+        item["registered_count"] = registered_count
+        item["max_participants"] = max_participants
+        item["capacity"] = max_participants
+
         item.update(_points_for(item))
         result.append(item)
 
