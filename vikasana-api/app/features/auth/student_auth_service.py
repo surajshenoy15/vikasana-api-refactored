@@ -1,8 +1,7 @@
-import os
 import hashlib
 import hmac
-from datetime import datetime, timezone, timedelta
 import random
+from datetime import datetime, timezone, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +11,7 @@ from app.features.students.models import Student
 from app.features.auth.models import StudentOtpSession
 from app.features.college_access.service import ensure_college_is_active
 from app.core.email_service import send_student_otp_email
+from app.core.jwt import create_access_token, create_refresh_token
 
 
 def _otp() -> str:
@@ -29,13 +29,18 @@ def _eq(a: str, b: str) -> bool:
 async def request_student_otp(db: AsyncSession, email: str) -> None:
     q = await db.execute(select(Student).where(Student.email == email))
     student = q.scalar_one_or_none()
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found with this email")
 
-    # ✅ SaaS college-wide access control
+    if not student:
+        raise HTTPException(
+            status_code=404,
+            detail="Student not found with this email"
+        )
+
+    # SaaS college-wide access control
     await ensure_college_is_active(db, student.college)
 
     otp = _otp()
+
     print("\n========= STUDENT OTP =========")
     print(f"EMAIL: {email}")
     print(f"OTP  : {otp}")
@@ -47,14 +52,23 @@ async def request_student_otp(db: AsyncSession, email: str) -> None:
         otp_expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
         attempts=0,
     )
+
     db.add(sess)
     await db.commit()
 
-    await send_student_otp_email(to_email=email, to_name=student.name, otp=otp)
+    await send_student_otp_email(
+        to_email=email,
+        to_name=student.name,
+        otp=otp
+    )
 
 
-async def verify_student_otp_and_issue_token(db: AsyncSession, email: str, otp: str) -> str:
-    # latest non-used session
+async def verify_student_otp_and_issue_token(
+    db: AsyncSession,
+    email: str,
+    otp: str
+) -> dict:
+    # latest non-used OTP session
     q = await db.execute(
         select(StudentOtpSession)
         .where(StudentOtpSession.email == email)
@@ -62,34 +76,66 @@ async def verify_student_otp_and_issue_token(db: AsyncSession, email: str, otp: 
         .order_by(StudentOtpSession.id.desc())
         .limit(1)
     )
+
     sess = q.scalar_one_or_none()
+
     if not sess:
-        raise HTTPException(status_code=400, detail="OTP not requested or already used")
+        raise HTTPException(
+            status_code=400,
+            detail="OTP not requested or already used"
+        )
 
     if sess.otp_expires_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=400, detail="OTP expired. Please request again.")
+        raise HTTPException(
+            status_code=400,
+            detail="OTP expired. Please request again."
+        )
 
     if sess.attempts >= 5:
-        raise HTTPException(status_code=429, detail="Too many attempts. Request OTP again.")
+        raise HTTPException(
+            status_code=429,
+            detail="Too many attempts. Request OTP again."
+        )
 
     sess.attempts += 1
 
     if not _eq(sess.otp_hash, _hash(otp)):
         await db.commit()
-        raise HTTPException(status_code=400, detail="Invalid OTP")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid OTP"
+        )
 
-    student_q = await db.execute(select(Student).where(Student.email == email))
+    student_q = await db.execute(
+        select(Student).where(Student.email == email)
+    )
+
     student = student_q.scalar_one_or_none()
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found with this email")
 
-    # ✅ SaaS college-wide access control
+    if not student:
+        raise HTTPException(
+            status_code=404,
+            detail="Student not found with this email"
+        )
+
+    # SaaS college-wide access control
     await ensure_college_is_active(db, student.college)
 
     sess.used_at = datetime.now(timezone.utc)
     await db.commit()
 
-    from app.core.jwt import create_access_token
-    token = create_access_token({"sub": email, "role": "student"})
+    access_token = create_access_token({
+        "sub": email,
+        "role": "student"
+    })
 
-    return token
+    refresh_token = create_refresh_token({
+        "sub": email,
+        "role": "student"
+    })
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
