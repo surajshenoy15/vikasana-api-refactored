@@ -53,9 +53,10 @@ from app.features.events.service import (
     end_event,
     list_student_event_certificates,
     regenerate_event_certificates,
-    generate_missing_event_certificates_batch, 
+    generate_missing_event_certificates_batch,
     auto_approve_event_from_sessions,
     get_student_event_draft_progress,
+    get_student_activity_progress,  # ✅ NEW
     _ensure_event_window,
     upload_event_thumbnail_file,
 )
@@ -477,6 +478,16 @@ async def delete_role_assignment(
         "assignment_id": assignment_id,
     }
 # ---------------------- STUDENT ---------------------------
+@router.get("/student/activity-progress")
+async def student_activity_progress_api(
+    db: AsyncSession = Depends(get_db),
+    student=Depends(get_current_student),
+):
+    return await get_student_activity_progress(
+        db=db,
+        student_id=student.id,
+    )
+
 @router.get("/student/events", response_model=list[EventOut])
 async def student_events(
     db: AsyncSession = Depends(get_db),

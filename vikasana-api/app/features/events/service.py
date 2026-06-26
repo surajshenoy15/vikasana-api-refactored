@@ -52,6 +52,15 @@ from app.features.certificates.models import Certificate, CertificateCounter
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 IST = ZoneInfo("Asia/Kolkata")
 
+# ✅ Activity point rules
+ACTIVITY_TYPE_POINT_CAP = 20
+
+REGULAR_TOTAL_REQUIRED = 100
+REGULAR_REQUIRED_ACTIVITY_TYPES = 5
+
+DIPLOMA_TOTAL_REQUIRED = 60
+DIPLOMA_REQUIRED_ACTIVITY_TYPES = 3
+
 
 # =========================================================
 # ---------------------- PARSERS ---------------------------
@@ -673,7 +682,8 @@ async def _calculate_submission_points(
     - AUTO   -> ActivityType.hours_per_unit + points_per_unit
     - MANUAL -> EventActivityType.manual_points
 
-    Enforces lifetime max_points per activity type using StudentActivityStats.points_awarded.
+    Rule:
+    - Each activity type can give maximum 20 points lifetime per student.
     """
 
     start_utc, end_utc = _event_window_utc(event)
@@ -701,6 +711,7 @@ async def _calculate_submission_points(
             StudentActivityStats.activity_type_id.in_(activity_type_ids),
         )
     )
+
     stats_by_type = {
         int(s.activity_type_id): s
         for s in stats_q.scalars().all()
@@ -743,7 +754,17 @@ async def _calculate_submission_points(
         )
 
         hours = float(hrs_q.scalar() or 0.0)
-        max_points = getattr(at, "max_points", None)
+
+        # ✅ Always force max 20 points per activity type
+        configured_max = getattr(at, "max_points", None)
+
+        try:
+            max_points = int(configured_max) if configured_max is not None else ACTIVITY_TYPE_POINT_CAP
+        except Exception:
+            max_points = ACTIVITY_TYPE_POINT_CAP
+
+        max_points = min(max_points, ACTIVITY_TYPE_POINT_CAP)
+
         score_mode = str(getattr(mapping, "score_mode", "AUTO") or "AUTO").upper()
         min_required_hours = float(getattr(mapping, "min_required_hours", 0) or 0)
 
@@ -751,13 +772,16 @@ async def _calculate_submission_points(
 
         if hours <= 0:
             raw_points = 0
+
         elif score_mode == "MANUAL":
             if hours >= min_required_hours:
                 raw_points = int(getattr(mapping, "manual_points", 0) or 0)
+
         else:
             if hours >= min_required_hours:
                 ppu = getattr(at, "points_per_unit", None)
                 hpu = getattr(at, "hours_per_unit", None)
+
                 if ppu is not None and hpu:
                     try:
                         raw_points = int(round((hours / float(hpu)) * float(ppu)))
@@ -769,16 +793,11 @@ async def _calculate_submission_points(
         stats_row = stats_by_type.get(at_id)
         already_awarded = int(getattr(stats_row, "points_awarded", 0) or 0)
 
-        if max_points is not None:
-            try:
-                remaining_cap = max(0, int(max_points) - already_awarded)
-            except Exception:
-                remaining_cap = 0
-            points_to_award = min(raw_points, remaining_cap)
-        else:
-            remaining_cap = None
-            points_to_award = raw_points
+        # ✅ Remaining points allowed for this activity type
+        remaining_cap = max(0, int(max_points) - already_awarded)
 
+        # ✅ Award only remaining allowed points
+        points_to_award = min(raw_points, remaining_cap)
         points_to_award = max(0, int(points_to_award))
 
         breakdown[at_id] = {
@@ -788,6 +807,7 @@ async def _calculate_submission_points(
             "already_awarded": already_awarded,
             "remaining_cap": remaining_cap,
             "points_to_award": points_to_award,
+            "max_points": max_points,
         }
 
         total_points += points_to_award
@@ -802,7 +822,9 @@ async def _credit_submission_points_once(
     """
     Credits points only once per submission.
 
-    Also enforces lifetime max per activity type using StudentActivityStats.
+    Rule:
+    - Each activity type can give maximum 20 points lifetime per student.
+    - completed_at is set only when that activity type reaches 20/20.
     """
     if bool(getattr(submission, "points_credited", False)):
         return int(getattr(submission, "awarded_points", 0) or 0)
@@ -831,23 +853,45 @@ async def _credit_submission_points_once(
         stats_row = stats_q.scalar_one_or_none()
 
         if stats_row is None:
+            final_points_for_type = min(
+                ACTIVITY_TYPE_POINT_CAP,
+                max(0, pts),
+            )
+
             stats_row = StudentActivityStats(
                 student_id=submission.student_id,
                 activity_type_id=int(at_id),
                 total_verified_hours=max(0.0, hrs),
-                points_awarded=max(0, pts),
-                completed_at=now_utc if pts > 0 else None,
+                points_awarded=final_points_for_type,
+                completed_at=(
+                    now_utc
+                    if final_points_for_type >= ACTIVITY_TYPE_POINT_CAP
+                    else None
+                ),
             )
             db.add(stats_row)
+
         else:
             # keep the highest verified hours seen so far for this activity type
             existing_hours = float(getattr(stats_row, "total_verified_hours", 0.0) or 0.0)
+            existing_points = int(getattr(stats_row, "points_awarded", 0) or 0)
+
+            final_points_for_type = min(
+                ACTIVITY_TYPE_POINT_CAP,
+                existing_points + max(0, pts),
+            )
+
             stats_row.total_verified_hours = max(existing_hours, hrs)
-            stats_row.points_awarded = int(getattr(stats_row, "points_awarded", 0) or 0) + max(0, pts)
-            if pts > 0:
+            stats_row.points_awarded = final_points_for_type
+
+            if (
+                final_points_for_type >= ACTIVITY_TYPE_POINT_CAP
+                and not getattr(stats_row, "completed_at", None)
+            ):
                 stats_row.completed_at = now_utc
 
     student.total_points_earned = int(student.total_points_earned or 0) + int(total_points)
+
     submission.awarded_points = int(total_points)
     submission.points_credited = True
 
@@ -856,6 +900,120 @@ async def _credit_submission_points_once(
 
     await db.commit()
     return total_points
+
+
+def _is_diploma_student(student: Student) -> bool:
+    """
+    Detect diploma student safely.
+    Change field names if your Student model has a specific column.
+    """
+    possible_fields = [
+        "student_type",
+        "course_type",
+        "program_type",
+        "admission_type",
+        "degree_type",
+    ]
+
+    for field in possible_fields:
+        value = getattr(student, field, None)
+        if value and "diploma" in str(value).lower():
+            return True
+
+    return False
+
+
+async def get_student_activity_progress(db: AsyncSession, student_id: int) -> dict:
+    student = await db.get(Student, student_id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    is_diploma = _is_diploma_student(student)
+
+    required_total_points = DIPLOMA_TOTAL_REQUIRED if is_diploma else REGULAR_TOTAL_REQUIRED
+    required_activity_types = DIPLOMA_REQUIRED_ACTIVITY_TYPES if is_diploma else REGULAR_REQUIRED_ACTIVITY_TYPES
+    student_type = "DIPLOMA" if is_diploma else "REGULAR"
+
+    # Get all activity types
+    at_q = await db.execute(
+        select(ActivityType).order_by(ActivityType.name.asc())
+    )
+    activity_types = at_q.scalars().all()
+
+    # Get this student's points per activity type
+    stats_q = await db.execute(
+        select(StudentActivityStats).where(
+            StudentActivityStats.student_id == student_id
+        )
+    )
+    stats_rows = stats_q.scalars().all()
+
+    stats_by_type = {
+        int(s.activity_type_id): s
+        for s in stats_rows
+        if s.activity_type_id is not None
+    }
+
+    items = []
+    total_points_raw = 0
+    completed_activity_types = 0
+
+    for at in activity_types:
+        at_id = int(at.id)
+        stats = stats_by_type.get(at_id)
+
+        earned = int(getattr(stats, "points_awarded", 0) or 0) if stats else 0
+        earned = min(earned, ACTIVITY_TYPE_POINT_CAP)
+
+        remaining = max(0, ACTIVITY_TYPE_POINT_CAP - earned)
+
+        if earned >= ACTIVITY_TYPE_POINT_CAP:
+            status = "COMPLETED"
+            completed_activity_types += 1
+        elif earned > 0:
+            status = "IN_PROGRESS"
+        else:
+            status = "NOT_STARTED"
+
+        total_points_raw += earned
+
+        items.append({
+            "activity_type_id": at_id,
+            "activity_type_name": getattr(at, "name", None) or f"Activity Type #{at_id}",
+            "earned_points": earned,
+            "max_points": ACTIVITY_TYPE_POINT_CAP,
+            "remaining_points": remaining,
+            "status": status,
+            "total_verified_hours": (
+                float(getattr(stats, "total_verified_hours", 0.0) or 0.0)
+                if stats else 0.0
+            ),
+            "completed_at": getattr(stats, "completed_at", None) if stats else None,
+        })
+
+    display_total_points = min(total_points_raw, required_total_points)
+
+    return {
+        "student_id": student_id,
+        "student_type": student_type,
+        "required_total_points": required_total_points,
+        "required_activity_types": required_activity_types,
+        "max_points_per_activity_type": ACTIVITY_TYPE_POINT_CAP,
+
+        "total_points": display_total_points,
+        "actual_total_points": total_points_raw,
+        "remaining_total_points": max(0, required_total_points - display_total_points),
+
+        "completed_activity_types": completed_activity_types,
+        "remaining_activity_types": max(0, required_activity_types - completed_activity_types),
+
+        "is_requirement_completed": (
+            display_total_points >= required_total_points
+            and completed_activity_types >= required_activity_types
+        ),
+
+        "activity_types": items,
+    }
 
 async def _eligible_students_from_sessions(
     db: AsyncSession,
@@ -903,14 +1061,8 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
     ✅ MAIN BUTTON LOGIC (Top approve):
     - Finds students with APPROVED sessions overlapping the event window for mapped activity types
     - Upserts EventSubmission => status="approved", sets submitted_at + approved_at
+    - Credits points immediately after approval
     - Does NOT generate certificates automatically
-
-    ✅ FIXES:
-    - ActivitySession.status matched case-insensitively (handles DB values like "APPROVED")
-    - Fallback activity-type inference uses OVERLAP logic (not started_at-only)
-    - Uses session_end = coalesce(submitted_at, expires_at, end_utc) to avoid NULL-end killing matches
-    - Treats expired/pending submissions as re-approvable if student is eligible
-    - Uses consistent UTC window logic
     """
 
     event = await db.get(Event, event_id)
@@ -942,7 +1094,9 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
                 session_end >= start_utc,
             )
         )
-        activity_type_ids = sorted({int(r[0]) for r in aq.all() if r and r[0] is not None})
+        activity_type_ids = sorted(
+            {int(r[0]) for r in aq.all() if r and r[0] is not None}
+        )
 
     if not activity_type_ids:
         return {
@@ -950,10 +1104,17 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
             "eligible_students": 0,
             "submissions_approved": 0,
             "certificates_issued": 0,
+            "points_credited_total": 0,
         }
 
-    eligible_student_ids = await _eligible_students_from_sessions(db, event, activity_type_ids)
-    eligible_student_ids = sorted({int(x) for x in (eligible_student_ids or []) if x is not None})
+    eligible_student_ids = await _eligible_students_from_sessions(
+        db,
+        event,
+        activity_type_ids,
+    )
+    eligible_student_ids = sorted(
+        {int(x) for x in (eligible_student_ids or []) if x is not None}
+    )
 
     if not eligible_student_ids:
         return {
@@ -961,6 +1122,7 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
             "eligible_students": 0,
             "submissions_approved": 0,
             "certificates_issued": 0,
+            "points_credited_total": 0,
         }
 
     now_utc = datetime.now(timezone.utc)
@@ -976,29 +1138,60 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
         sub = res.scalar_one_or_none()
 
         if sub is None:
-            sub = EventSubmission(event_id=event_id, student_id=sid, status="approved")
+            sub = EventSubmission(
+                event_id=event_id,
+                student_id=sid,
+                status="approved",
+            )
+
             if hasattr(sub, "submitted_at"):
                 sub.submitted_at = now_utc
+
             if hasattr(sub, "approved_at"):
                 sub.approved_at = now_utc
+
             db.add(sub)
             submissions_approved += 1
+
         else:
             if (sub.status or "").lower() != "approved":
                 sub.status = "approved"
+
                 if hasattr(sub, "submitted_at") and getattr(sub, "submitted_at", None) is None:
                     sub.submitted_at = now_utc
+
                 if hasattr(sub, "approved_at"):
                     sub.approved_at = now_utc
+
                 submissions_approved += 1
 
     await db.commit()
+
+    # ✅ NEW: credit points after auto-approval
+    points_credited_total = 0
+
+    for sid in eligible_student_ids:
+        sub_q = await db.execute(
+            select(EventSubmission).where(
+                EventSubmission.event_id == event_id,
+                EventSubmission.student_id == sid,
+            )
+        )
+        sub = sub_q.scalar_one_or_none()
+
+        if sub:
+            points_credited_total += await _credit_submission_points_once(
+                db=db,
+                submission=sub,
+                event=event,
+            )
 
     return {
         "event_id": event_id,
         "eligible_students": len(eligible_student_ids),
         "submissions_approved": submissions_approved,
         "certificates_issued": 0,
+        "points_credited_total": points_credited_total,
     }
 
 async def _infer_activity_type_ids_from_sessions(
