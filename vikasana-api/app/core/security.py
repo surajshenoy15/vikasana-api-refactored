@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from jose import jwt
 from passlib.context import CryptContext
 from app.core.config import settings
@@ -47,25 +47,23 @@ def verify_password(plain: str, hashed: str | None) -> bool:
 # ── JWT Token ─────────────────────────────────────────────────────────
 def create_access_token(admin_id: int, email: str) -> str:
     """
-    Creates a signed JWT. Change SECRET_KEY in .env to invalidate all tokens.
-    Change ACCESS_TOKEN_EXPIRE_MINUTES in .env to adjust session length.
-
-    Payload contains:
-      sub   — admin ID (standard JWT claim)
-      email — for frontend display
-      type  — guards against using wrong token types
-      iat   — issued at
-      exp   — expiry (set by ACCESS_TOKEN_EXPIRE_MINUTES in .env)
+    Creates a signed JWT with NO expiry.
+    Token remains valid until SECRET_KEY changes.
     """
     now = datetime.now(timezone.utc)
+
     payload = {
-        "sub":   str(admin_id),
+        "sub": str(admin_id),
         "email": email,
-        "type":  "access",
-        "iat":   now,
-        "exp":   now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        "type": "access",
+        "iat": int(now.timestamp()),
     }
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+    return jwt.encode(
+        payload,
+        settings.SECRET_KEY,
+        algorithm=settings.ALGORITHM,
+    )
 
 
 def decode_access_token(token: str) -> dict:
