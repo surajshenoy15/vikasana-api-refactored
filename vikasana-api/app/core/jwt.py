@@ -7,12 +7,9 @@ from app.core.config import settings
 def create_access_token(data: dict, expires_minutes: int | None = None) -> str:
     payload = data.copy()
 
-    exp = datetime.now(timezone.utc) + timedelta(
-        minutes=expires_minutes or settings.ACCESS_TOKEN_EXPIRE_MINUTES
-    )
-
+    # No "exp" added here, so access token will not expire automatically
     payload.update({
-        "exp": exp,
+        "iat": int(datetime.now(timezone.utc).timestamp()),
         "token_type": "access"
     })
 
