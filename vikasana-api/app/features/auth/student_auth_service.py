@@ -94,65 +94,54 @@ def _eq(first_value: str, second_value: str) -> bool:
 # ---------------------------------------------------------
 # Request student OTP
 # ---------------------------------------------------------
+APPLE_REVIEW_EMAIL = "appletestreviewer@gmail.com"
+APPLE_REVIEW_OTP = "123456"
 
-async def request_student_otp(
-    db: AsyncSession,
-    email: str,
-) -> None:
-    normalized_email = _normalize_email(email)
 
-    student_query = await db.execute(
-        select(Student).where(
-            func.lower(Student.email) == normalized_email
-        )
+async def request_student_otp(db: AsyncSession, email: str) -> None:
+    email = email.strip().lower()
+
+    q = await db.execute(
+        select(Student).where(Student.email == email)
     )
-
-    student = student_query.scalar_one_or_none()
+    student = q.scalar_one_or_none()
 
     if not student:
         raise HTTPException(
             status_code=404,
-            detail="Student not found with this email",
+            detail="Student not found with this email"
         )
 
-    # The reviewer account should belong to an active demo college.
-    await ensure_college_is_active(
-        db,
-        student.college,
-    )
+    await ensure_college_is_active(db, student.college)
 
-    is_review_account = _is_app_review_account(
-        normalized_email
-    )
+    is_apple_reviewer = email == APPLE_REVIEW_EMAIL
 
-    # Use fixed OTP only for Apple's reviewer account.
-    otp = APP_REVIEW_OTP if is_review_account else _otp()
+    # Fixed OTP only for Apple's reviewer account
+    if is_apple_reviewer:
+        otp = APPLE_REVIEW_OTP
+    else:
+        otp = _otp()
 
-    otp_session = StudentOtpSession(
-        email=normalized_email,
+    sess = StudentOtpSession(
+        email=email,
         otp_hash=_hash(otp),
-        otp_expires_at=(
-            datetime.now(timezone.utc)
-            + timedelta(minutes=10)
-        ),
+        otp_expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
         attempts=0,
     )
 
-    db.add(otp_session)
+    db.add(sess)
     await db.commit()
 
-    if is_review_account:
-        # Do not send an email because Apple already has the fixed OTP.
-        logger.info(
-            "Created App Review OTP session for reviewer account."
-        )
+    # Apple already knows the fixed OTP, so don't send email
+    if is_apple_reviewer:
+        print("Apple App Review OTP session created")
         return
 
-    # Standard student OTP delivery.
+    # Normal students still receive OTP emails
     await send_student_otp_email(
-        to_email=normalized_email,
+        to_email=email,
         to_name=student.name,
-        otp=otp,
+        otp=otp
     )
 
 
