@@ -388,6 +388,87 @@ class StudentAcademicHistory(Base):
         ),
     )
 
+class StudentFacultyAssignment(Base):
+    __tablename__ = "student_faculty_assignments"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    student_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "students.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+
+    previous_faculty_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    assigned_faculty_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    action: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+    )
+
+    assigned_by_faculty_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    assigned_by_admin_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "admins.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    note: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_student_faculty_assignments_student_created",
+            "student_id",
+            "created_at",
+        ),
+        Index(
+            "ix_student_faculty_assignments_assigned_faculty",
+            "assigned_faculty_id",
+        ),
+    )
 Index(
     "uq_academic_batches_identity_ci",
     func.lower(func.trim(AcademicBatch.college)),
