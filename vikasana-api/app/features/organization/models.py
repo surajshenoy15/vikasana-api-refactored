@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     SmallInteger,
     String,
+    Text,
     func,
     text,
 )
@@ -264,6 +265,128 @@ class AcademicBatch(Base):
         ),
     )
 
+class StudentAcademicHistory(Base):
+    __tablename__ = "student_academic_history"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    student_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "students.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+
+    action: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+    )
+
+    from_department_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "departments.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    to_department_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "departments.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    from_batch_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "academic_batches.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    to_batch_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "academic_batches.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    from_year: Mapped[int | None] = mapped_column(
+        SmallInteger,
+        nullable=True,
+    )
+
+    to_year: Mapped[int | None] = mapped_column(
+        SmallInteger,
+        nullable=True,
+    )
+
+    academic_session: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+    )
+
+    reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    changed_by_faculty_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    changed_by_admin_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "admins.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "from_year IS NULL OR from_year BETWEEN 1 AND 8",
+            name="ck_student_history_from_year",
+        ),
+        CheckConstraint(
+            "to_year IS NULL OR to_year BETWEEN 1 AND 8",
+            name="ck_student_history_to_year",
+        ),
+        Index(
+            "ix_student_academic_history_student_created",
+            "student_id",
+            "created_at",
+        ),
+        Index(
+            "ix_student_academic_history_changed_by_faculty",
+            "changed_by_faculty_id",
+        ),
+    )
 
 Index(
     "uq_academic_batches_identity_ci",
