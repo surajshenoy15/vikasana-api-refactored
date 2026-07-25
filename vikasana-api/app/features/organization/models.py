@@ -71,6 +71,14 @@ class CollegeOrganizationSetting(Base):
         ),
     )
 
+
+Index(
+    "uq_college_organization_settings_college_ci",
+    func.lower(func.trim(CollegeOrganizationSetting.college)),
+    unique=True,
+)
+
+
 class Department(Base):
     __tablename__ = "departments"
 
@@ -104,13 +112,19 @@ class Department(Base):
 
     created_by_faculty_id: Mapped[int | None] = mapped_column(
         Integer,
-        ForeignKey("faculty.id", ondelete="SET NULL"),
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
         nullable=True,
     )
 
     created_by_admin_id: Mapped[int | None] = mapped_column(
         Integer,
-        ForeignKey("admins.id", ondelete="SET NULL"),
+        ForeignKey(
+            "admins.id",
+            ondelete="SET NULL",
+        ),
         nullable=True,
     )
 
@@ -147,14 +161,115 @@ Index(
     unique=True,
 )
 
+
 Index(
     "uq_departments_college_code_ci",
     func.lower(func.trim(Department.college)),
     func.lower(func.trim(Department.code)),
     unique=True,
 )
+
+
+class AcademicBatch(Base):
+    __tablename__ = "academic_batches"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    college: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(80),
+        nullable=False,
+    )
+
+    admitted_year: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    passout_year: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    course_duration_years: Mapped[int] = mapped_column(
+        SmallInteger,
+        nullable=False,
+        default=4,
+        server_default=text("4"),
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+    )
+
+    created_by_faculty_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    created_by_admin_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "admins.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "passout_year > admitted_year",
+            name="ck_academic_batches_year_order",
+        ),
+        CheckConstraint(
+            "course_duration_years BETWEEN 1 AND 8",
+            name="ck_academic_batches_duration",
+        ),
+        Index(
+            "ix_academic_batches_college",
+            "college",
+        ),
+        Index(
+            "ix_academic_batches_college_active",
+            "college",
+            "is_active",
+        ),
+    )
+
+
 Index(
-    "uq_college_organization_settings_college_ci",
-    func.lower(func.trim(CollegeOrganizationSetting.college)),
+    "uq_academic_batches_identity_ci",
+    func.lower(func.trim(AcademicBatch.college)),
+    AcademicBatch.admitted_year,
+    AcademicBatch.passout_year,
+    AcademicBatch.course_duration_years,
     unique=True,
 )
