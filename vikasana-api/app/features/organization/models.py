@@ -265,6 +265,17 @@ class AcademicBatch(Base):
         ),
     )
 
+
+Index(
+    "uq_academic_batches_identity_ci",
+    func.lower(func.trim(AcademicBatch.college)),
+    AcademicBatch.admitted_year,
+    AcademicBatch.passout_year,
+    AcademicBatch.course_duration_years,
+    unique=True,
+)
+
+
 class StudentAcademicHistory(Base):
     __tablename__ = "student_academic_history"
 
@@ -388,6 +399,7 @@ class StudentAcademicHistory(Base):
         ),
     )
 
+
 class StudentFacultyAssignment(Base):
     __tablename__ = "student_faculty_assignments"
 
@@ -469,11 +481,3 @@ class StudentFacultyAssignment(Base):
             "assigned_faculty_id",
         ),
     )
-Index(
-    "uq_academic_batches_identity_ci",
-    func.lower(func.trim(AcademicBatch.college)),
-    AcademicBatch.admitted_year,
-    AcademicBatch.passout_year,
-    AcademicBatch.course_duration_years,
-    unique=True,
-)
