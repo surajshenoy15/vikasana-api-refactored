@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
 
 from sqlalchemy import (
     Boolean,
@@ -19,6 +19,7 @@ from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.features.students.models import Student
+    from app.features.organization.models import Department
 
 
 class Faculty(Base):
@@ -69,6 +70,11 @@ class Faculty(Base):
         nullable=False,
         default=False,
         server_default=text("false"),
+    )
+    department: Mapped["Department | None"] = relationship(
+        "Department",
+        back_populates="faculty_members",
+        foreign_keys=[department_id],
     )
 
     is_active: Mapped[bool] = mapped_column(
