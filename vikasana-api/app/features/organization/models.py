@@ -26,6 +26,11 @@ if TYPE_CHECKING:
     from app.features.students.models import Student
 
 
+# --------------------------------------------------
+# COLLEGE ORGANISATION SETTINGS
+# --------------------------------------------------
+
+
 class CollegeOrganizationSetting(Base):
     __tablename__ = "college_organization_settings"
 
@@ -84,6 +89,11 @@ Index(
     func.lower(func.trim(CollegeOrganizationSetting.college)),
     unique=True,
 )
+
+
+# --------------------------------------------------
+# DEPARTMENT
+# --------------------------------------------------
 
 
 class Department(Base):
@@ -181,6 +191,11 @@ Index(
     func.lower(func.trim(Department.code)),
     unique=True,
 )
+
+
+# --------------------------------------------------
+# ACADEMIC BATCH
+# --------------------------------------------------
 
 
 class AcademicBatch(Base):
@@ -286,6 +301,11 @@ Index(
     AcademicBatch.course_duration_years,
     unique=True,
 )
+
+
+# --------------------------------------------------
+# STUDENT ACADEMIC HISTORY
+# --------------------------------------------------
 
 
 class StudentAcademicHistory(Base):
@@ -448,6 +468,11 @@ class StudentAcademicHistory(Base):
     )
 
 
+# --------------------------------------------------
+# STUDENT FACULTY ASSIGNMENT HISTORY
+# --------------------------------------------------
+
+
 class StudentFacultyAssignment(Base):
     __tablename__ = "student_faculty_assignments"
 
@@ -516,6 +541,32 @@ class StudentFacultyAssignment(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+    )
+
+    student: Mapped["Student"] = relationship(
+        "Student",
+        back_populates="faculty_assignment_history",
+        foreign_keys=[student_id],
+    )
+
+    previous_faculty: Mapped[Optional["Faculty"]] = relationship(
+        "Faculty",
+        foreign_keys=[previous_faculty_id],
+    )
+
+    assigned_faculty: Mapped[Optional["Faculty"]] = relationship(
+        "Faculty",
+        foreign_keys=[assigned_faculty_id],
+    )
+
+    assigned_by_faculty: Mapped[Optional["Faculty"]] = relationship(
+        "Faculty",
+        foreign_keys=[assigned_by_faculty_id],
+    )
+
+    assigned_by_admin: Mapped[Optional["Admin"]] = relationship(
+        "Admin",
+        foreign_keys=[assigned_by_admin_id],
     )
 
     __table_args__ = (

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         AcademicBatch,
         Department,
         StudentAcademicHistory,
+        StudentFacultyAssignment,
     )
 
     from app.features.activities.models import (
@@ -58,7 +59,6 @@ class Student(Base):
     __tablename__ = "students"
 
     __table_args__ = (
-        # Existing uniqueness rules per college.
         UniqueConstraint(
             "college",
             "usn",
@@ -69,7 +69,6 @@ class Student(Base):
             "email",
             name="uq_students_college_email",
         ),
-        # Current academic year remains nullable until department mode is used.
         CheckConstraint(
             "current_year IS NULL OR current_year BETWEEN 1 AND 8",
             name="ck_students_current_year",
@@ -141,7 +140,6 @@ class Student(Base):
     # STATUS / SOFT DELETE
     # --------------------------------------------------
 
-    # Used instead of hard delete to protect dependent records.
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -169,7 +167,7 @@ class Student(Base):
     )
 
     # --------------------------------------------------
-    # FACE ENROLLMENT SYSTEM
+    # FACE ENROLMENT SYSTEM
     # --------------------------------------------------
 
     face_enrolled: Mapped[bool] = mapped_column(
@@ -203,7 +201,6 @@ class Student(Base):
     # CURRENT ORGANISATION / ACADEMIC STATE
     # --------------------------------------------------
 
-    # Nullable so existing production students remain unaffected.
     department_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
@@ -214,7 +211,6 @@ class Student(Base):
         index=True,
     )
 
-    # Current batch, such as 2026-2030.
     batch_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
@@ -225,14 +221,11 @@ class Student(Base):
         index=True,
     )
 
-    # Current year within the course, normally 1-4 for engineering.
     current_year: Mapped[Optional[int]] = mapped_column(
         SmallInteger,
         nullable=True,
     )
 
-    # Current faculty assignment only.
-    # This does not replace created_by_faculty_id.
     assigned_faculty_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
@@ -242,8 +235,6 @@ class Student(Base):
         nullable=True,
         index=True,
     )
-
-
 
     # --------------------------------------------------
     # TIMESTAMPS
@@ -259,7 +250,6 @@ class Student(Base):
     # CREATED BY FACULTY
     # --------------------------------------------------
 
-    # Permanent record of who originally created the student.
     created_by_faculty_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
@@ -295,10 +285,24 @@ class Student(Base):
         "Faculty",
         foreign_keys=[assigned_faculty_id],
     )
+
+    # --------------------------------------------------
+    # ORGANISATION HISTORY RELATIONSHIPS
+    # --------------------------------------------------
+
     academic_history: Mapped[List["StudentAcademicHistory"]] = relationship(
         "StudentAcademicHistory",
         back_populates="student",
         foreign_keys="StudentAcademicHistory.student_id",
+        cascade="all, delete-orphan",
+    )
+
+    faculty_assignment_history: Mapped[
+        List["StudentFacultyAssignment"]
+    ] = relationship(
+        "StudentFacultyAssignment",
+        back_populates="student",
+        foreign_keys="StudentFacultyAssignment.student_id",
         cascade="all, delete-orphan",
     )
 
