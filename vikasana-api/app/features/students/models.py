@@ -23,7 +23,11 @@ from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.features.faculty.models import Faculty
-    from app.features.organization.models import AcademicBatch, Department
+    from app.features.organization.models import (
+        AcademicBatch,
+        Department,
+        StudentAcademicHistory,
+    )
 
     from app.features.activities.models import (
         ActivityFaceCheck,
@@ -239,6 +243,8 @@ class Student(Base):
         index=True,
     )
 
+
+
     # --------------------------------------------------
     # TIMESTAMPS
     # --------------------------------------------------
@@ -288,6 +294,12 @@ class Student(Base):
     assigned_faculty: Mapped[Optional["Faculty"]] = relationship(
         "Faculty",
         foreign_keys=[assigned_faculty_id],
+    )
+    academic_history: Mapped[List["StudentAcademicHistory"]] = relationship(
+        "StudentAcademicHistory",
+        back_populates="student",
+        foreign_keys="StudentAcademicHistory.student_id",
+        cascade="all, delete-orphan",
     )
 
     # --------------------------------------------------

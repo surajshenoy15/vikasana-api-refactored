@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import List, Optional, TYPE_CHECKING
 
 from sqlalchemy import (
     Boolean,
@@ -15,9 +16,14 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.features.auth.models import Admin
+    from app.features.faculty.models import Faculty
+    from app.features.students.models import Student
 
 
 class CollegeOrganizationSetting(Base):
@@ -111,7 +117,7 @@ class Department(Base):
         server_default=text("true"),
     )
 
-    created_by_faculty_id: Mapped[int | None] = mapped_column(
+    created_by_faculty_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
             "faculty.id",
@@ -120,7 +126,7 @@ class Department(Base):
         nullable=True,
     )
 
-    created_by_admin_id: Mapped[int | None] = mapped_column(
+    created_by_admin_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
             "admins.id",
@@ -140,6 +146,12 @@ class Department(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+    faculty_members: Mapped[List["Faculty"]] = relationship(
+        "Faculty",
+        back_populates="department",
+        foreign_keys="Faculty.department_id",
     )
 
     __table_args__ = (
@@ -214,7 +226,7 @@ class AcademicBatch(Base):
         server_default=text("true"),
     )
 
-    created_by_faculty_id: Mapped[int | None] = mapped_column(
+    created_by_faculty_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
             "faculty.id",
@@ -223,7 +235,7 @@ class AcademicBatch(Base):
         nullable=True,
     )
 
-    created_by_admin_id: Mapped[int | None] = mapped_column(
+    created_by_admin_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
             "admins.id",
@@ -299,7 +311,7 @@ class StudentAcademicHistory(Base):
         nullable=False,
     )
 
-    from_department_id: Mapped[int | None] = mapped_column(
+    from_department_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
             "departments.id",
@@ -308,7 +320,7 @@ class StudentAcademicHistory(Base):
         nullable=True,
     )
 
-    to_department_id: Mapped[int | None] = mapped_column(
+    to_department_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
             "departments.id",
@@ -317,7 +329,7 @@ class StudentAcademicHistory(Base):
         nullable=True,
     )
 
-    from_batch_id: Mapped[int | None] = mapped_column(
+    from_batch_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
             "academic_batches.id",
@@ -326,7 +338,7 @@ class StudentAcademicHistory(Base):
         nullable=True,
     )
 
-    to_batch_id: Mapped[int | None] = mapped_column(
+    to_batch_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
             "academic_batches.id",
@@ -335,27 +347,27 @@ class StudentAcademicHistory(Base):
         nullable=True,
     )
 
-    from_year: Mapped[int | None] = mapped_column(
+    from_year: Mapped[Optional[int]] = mapped_column(
         SmallInteger,
         nullable=True,
     )
 
-    to_year: Mapped[int | None] = mapped_column(
+    to_year: Mapped[Optional[int]] = mapped_column(
         SmallInteger,
         nullable=True,
     )
 
-    academic_session: Mapped[str | None] = mapped_column(
+    academic_session: Mapped[Optional[str]] = mapped_column(
         String(20),
         nullable=True,
     )
 
-    reason: Mapped[str | None] = mapped_column(
+    reason: Mapped[Optional[str]] = mapped_column(
         Text,
         nullable=True,
     )
 
-    changed_by_faculty_id: Mapped[int | None] = mapped_column(
+    changed_by_faculty_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
             "faculty.id",
@@ -364,7 +376,7 @@ class StudentAcademicHistory(Base):
         nullable=True,
     )
 
-    changed_by_admin_id: Mapped[int | None] = mapped_column(
+    changed_by_admin_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
             "admins.id",
@@ -377,6 +389,42 @@ class StudentAcademicHistory(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+    )
+
+    student: Mapped["Student"] = relationship(
+        "Student",
+        back_populates="academic_history",
+        foreign_keys=[student_id],
+    )
+
+    from_department: Mapped[Optional["Department"]] = relationship(
+        "Department",
+        foreign_keys=[from_department_id],
+    )
+
+    to_department: Mapped[Optional["Department"]] = relationship(
+        "Department",
+        foreign_keys=[to_department_id],
+    )
+
+    from_batch: Mapped[Optional["AcademicBatch"]] = relationship(
+        "AcademicBatch",
+        foreign_keys=[from_batch_id],
+    )
+
+    to_batch: Mapped[Optional["AcademicBatch"]] = relationship(
+        "AcademicBatch",
+        foreign_keys=[to_batch_id],
+    )
+
+    changed_by_faculty: Mapped[Optional["Faculty"]] = relationship(
+        "Faculty",
+        foreign_keys=[changed_by_faculty_id],
+    )
+
+    changed_by_admin: Mapped[Optional["Admin"]] = relationship(
+        "Admin",
+        foreign_keys=[changed_by_admin_id],
     )
 
     __table_args__ = (
@@ -418,7 +466,7 @@ class StudentFacultyAssignment(Base):
         nullable=False,
     )
 
-    previous_faculty_id: Mapped[int | None] = mapped_column(
+    previous_faculty_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
             "faculty.id",
@@ -427,7 +475,7 @@ class StudentFacultyAssignment(Base):
         nullable=True,
     )
 
-    assigned_faculty_id: Mapped[int | None] = mapped_column(
+    assigned_faculty_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
             "faculty.id",
@@ -441,7 +489,7 @@ class StudentFacultyAssignment(Base):
         nullable=False,
     )
 
-    assigned_by_faculty_id: Mapped[int | None] = mapped_column(
+    assigned_by_faculty_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
             "faculty.id",
@@ -450,7 +498,7 @@ class StudentFacultyAssignment(Base):
         nullable=True,
     )
 
-    assigned_by_admin_id: Mapped[int | None] = mapped_column(
+    assigned_by_admin_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(
             "admins.id",
@@ -459,7 +507,7 @@ class StudentFacultyAssignment(Base):
         nullable=True,
     )
 
-    note: Mapped[str | None] = mapped_column(
+    note: Mapped[Optional[str]] = mapped_column(
         Text,
         nullable=True,
     )
