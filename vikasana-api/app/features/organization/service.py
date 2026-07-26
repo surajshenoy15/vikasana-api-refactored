@@ -6,10 +6,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.features.organization.models import (
+    AcademicBatch,
     CollegeOrganizationSetting,
     Department,
 )
 from app.features.organization.schemas import (
+    AcademicBatchCreateRequest,
+    AcademicBatchResponse,
+    AcademicBatchUpdateRequest,
     DepartmentCreateRequest,
     DepartmentResponse,
     DepartmentUpdateRequest,
@@ -301,3 +305,197 @@ async def update_department(
     await db.refresh(department)
 
     return DepartmentResponse.model_validate(department)
+
+
+# --------------------------------------------------
+# ACADEMIC BATCH HELPERS
+# --------------------------------------------------
+
+
+async def _find_academic_batch(
+    db: AsyncSession,
+    batch_id: int,
+    college: str,
+) -> AcademicBatch | None:
+    normalized_college = normalize_college(college)
+
+    result = await db.execute(
+        select(AcademicBatch).where(
+            AcademicBatch.id == batch_id,
+            _college_matches(
+                AcademicBatch.college,
+                normalized_college,
+            ),
+        )
+    )
+
+    return result.scalar_one_or_none()
+
+
+def _validate_batch_year_order(
+    admitted_year: int,
+    passout_year: int,
+) -> None:
+    if passout_year <= admitted_year:
+        raise HTTPException(
+            status_code=400,
+            detail="passout_year must be greater than admitted_year",
+        )
+
+
+# --------------------------------------------------
+# ACADEMIC BATCH READ OPERATIONS
+# --------------------------------------------------
+
+
+async def list_academic_batches(
+    db: AsyncSession,
+    college: str,
+    include_inactive: bool = False,
+) -> list[AcademicBatchResponse]:
+    normalized_college = normalize_college(college)
+
+    statement = select(AcademicBatch).where(
+        _college_matches(
+            AcademicBatch.college,
+            normalized_college,
+        )
+    )
+
+    if not include_inactive:
+        statement = statement.where(
+            AcademicBatch.is_active.is_(True)
+        )
+
+    statement = statement.order_by(
+        AcademicBatch.admitted_year.desc(),
+        AcademicBatch.passout_year.desc(),
+        AcademicBatch.id.desc(),
+    )
+
+    result = await db.execute(statement)
+    batches = result.scalars().all()
+
+    return [
+        AcademicBatchResponse.model_validate(batch)
+        for batch in batches
+    ]
+
+
+async def get_academic_batch(
+    db: AsyncSession,
+    batch_id: int,
+    college: str,
+) -> AcademicBatchResponse:
+    batch = await _find_academic_batch(
+        db,
+        batch_id,
+        college,
+    )
+
+    if batch is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Academic batch not found",
+        )
+
+    return AcademicBatchResponse.model_validate(batch)
+
+
+# --------------------------------------------------
+# ACADEMIC BATCH WRITE OPERATIONS
+# --------------------------------------------------
+
+
+async def create_academic_batch(
+    db: AsyncSession,
+    payload: AcademicBatchCreateRequest,
+    *,
+    created_by_admin_id: int | None = None,
+    created_by_faculty_id: int | None = None,
+) -> AcademicBatchResponse:
+    normalized_college = normalize_college(payload.college)
+
+    _validate_batch_year_order(
+        payload.admitted_year,
+        payload.passout_year,
+    )
+
+    batch = AcademicBatch(
+        college=normalized_college,
+        name=payload.name,
+        admitted_year=payload.admitted_year,
+        passout_year=payload.passout_year,
+        course_duration_years=payload.course_duration_years,
+        is_active=payload.is_active,
+        created_by_admin_id=created_by_admin_id,
+        created_by_faculty_id=created_by_faculty_id,
+    )
+
+    db.add(batch)
+
+    await _commit_or_raise_conflict(
+        db,
+        (
+            "An academic batch with the same years and course "
+            "duration already exists for this college"
+        ),
+    )
+
+    await db.refresh(batch)
+
+    return AcademicBatchResponse.model_validate(batch)
+
+
+async def update_academic_batch(
+    db: AsyncSession,
+    batch_id: int,
+    college: str,
+    payload: AcademicBatchUpdateRequest,
+) -> AcademicBatchResponse:
+    batch = await _find_academic_batch(
+        db,
+        batch_id,
+        college,
+    )
+
+    if batch is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Academic batch not found",
+        )
+
+    updates = payload.model_dump(
+        exclude_unset=True,
+        exclude_none=True,
+    )
+
+    effective_admitted_year = updates.get(
+        "admitted_year",
+        batch.admitted_year,
+    )
+
+    effective_passout_year = updates.get(
+        "passout_year",
+        batch.passout_year,
+    )
+
+    _validate_batch_year_order(
+        effective_admitted_year,
+        effective_passout_year,
+    )
+
+    for field_name, value in updates.items():
+        setattr(batch, field_name, value)
+
+    await _commit_or_raise_conflict(
+        db,
+        (
+            "An academic batch with the same years and course "
+            "duration already exists for this college"
+        ),
+    )
+
+    await db.refresh(batch)
+
+    return AcademicBatchResponse.model_validate(batch)
