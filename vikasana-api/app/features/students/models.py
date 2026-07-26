@@ -1,19 +1,21 @@
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from typing import List, Optional, TYPE_CHECKING
-from datetime import datetime
 
 from sqlalchemy import (
-    String,
-    Integer,
-    DateTime,
-    func,
-    UniqueConstraint,
-    Enum as SAEnum,
     Boolean,
-    Index,
+    CheckConstraint,
+    DateTime,
+    Enum as SAEnum,
     ForeignKey,
+    Index,
+    Integer,
+    SmallInteger,
+    String,
+    UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -21,19 +23,22 @@ from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.features.faculty.models import Faculty
-    from app.features.activities.models import ActivitySession
-    from app.features.activities.models import StudentActivityStats
-    from app.features.face.models import StudentFaceEmbedding
-    from app.features.activities.models import ActivityFaceCheck
-    from app.features.activities.models import ActivityPhoto
+    from app.features.organization.models import AcademicBatch, Department
 
-    # ✅ OPTIONAL (only if you add audit log table)
-    from app.features.activities.models import StudentPointAdjustment
+    from app.features.activities.models import (
+        ActivityFaceCheck,
+        ActivityPhoto,
+        ActivitySession,
+        StudentActivityStats,
+        StudentPointAdjustment,
+    )
+    from app.features.face.models import StudentFaceEmbedding
 
 
 # --------------------------------------------------
 # ENUM
 # --------------------------------------------------
+
 
 class StudentType(str, Enum):
     REGULAR = "REGULAR"
@@ -44,21 +49,48 @@ class StudentType(str, Enum):
 # MODEL
 # --------------------------------------------------
 
+
 class Student(Base):
     __tablename__ = "students"
 
     __table_args__ = (
-        # ✅ FIXED: uniqueness per college
-        UniqueConstraint("college", "usn", name="uq_students_college_usn"),
-        UniqueConstraint("college", "email", name="uq_students_college_email"),
-        Index("ix_students_college_branch", "college", "branch"),
+        # Existing uniqueness rules per college.
+        UniqueConstraint(
+            "college",
+            "usn",
+            name="uq_students_college_usn",
+        ),
+        UniqueConstraint(
+            "college",
+            "email",
+            name="uq_students_college_email",
+        ),
+        # Current academic year remains nullable until department mode is used.
+        CheckConstraint(
+            "current_year IS NULL OR current_year BETWEEN 1 AND 8",
+            name="ck_students_current_year",
+        ),
+        Index(
+            "ix_students_college_branch",
+            "college",
+            "branch",
+        ),
+        Index(
+            "ix_students_college_department_batch",
+            "college",
+            "department_id",
+            "batch_id",
+        ),
     )
 
     # --------------------------------------------------
     # PRIMARY KEY
     # --------------------------------------------------
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
 
     # --------------------------------------------------
     # BASIC DETAILS
@@ -93,7 +125,10 @@ class Student(Base):
     )
 
     student_type: Mapped[StudentType] = mapped_column(
-        SAEnum(StudentType, name="student_type_enum"),
+        SAEnum(
+            StudentType,
+            name="student_type_enum",
+        ),
         nullable=False,
         server_default=StudentType.REGULAR.value,
     )
@@ -102,8 +137,7 @@ class Student(Base):
     # STATUS / SOFT DELETE
     # --------------------------------------------------
 
-    # ✅ Used instead of hard delete.
-    # This prevents certificate / submission FK errors.
+    # Used instead of hard delete to protect dependent records.
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -162,6 +196,50 @@ class Student(Base):
     )
 
     # --------------------------------------------------
+    # CURRENT ORGANISATION / ACADEMIC STATE
+    # --------------------------------------------------
+
+    # Nullable so existing production students remain unaffected.
+    department_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "departments.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    # Current batch, such as 2026-2030.
+    batch_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "academic_batches.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    # Current year within the course, normally 1-4 for engineering.
+    current_year: Mapped[Optional[int]] = mapped_column(
+        SmallInteger,
+        nullable=True,
+    )
+
+    # Current faculty assignment only.
+    # This does not replace created_by_faculty_id.
+    assigned_faculty_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    # --------------------------------------------------
     # TIMESTAMPS
     # --------------------------------------------------
 
@@ -172,12 +250,16 @@ class Student(Base):
     )
 
     # --------------------------------------------------
-    # CREATED BY (FACULTY)
+    # CREATED BY FACULTY
     # --------------------------------------------------
 
+    # Permanent record of who originally created the student.
     created_by_faculty_id: Mapped[Optional[int]] = mapped_column(
         Integer,
-        ForeignKey("faculty.id", ondelete="SET NULL"),
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
         nullable=True,
         index=True,
     )
@@ -190,7 +272,26 @@ class Student(Base):
     )
 
     # --------------------------------------------------
-    # RELATIONSHIPS
+    # CURRENT ORGANISATION RELATIONSHIPS
+    # --------------------------------------------------
+
+    department: Mapped[Optional["Department"]] = relationship(
+        "Department",
+        foreign_keys=[department_id],
+    )
+
+    batch: Mapped[Optional["AcademicBatch"]] = relationship(
+        "AcademicBatch",
+        foreign_keys=[batch_id],
+    )
+
+    assigned_faculty: Mapped[Optional["Faculty"]] = relationship(
+        "Faculty",
+        foreign_keys=[assigned_faculty_id],
+    )
+
+    # --------------------------------------------------
+    # EXISTING RELATIONSHIPS
     # --------------------------------------------------
 
     activity_sessions: Mapped[List["ActivitySession"]] = relationship(
@@ -223,7 +324,6 @@ class Student(Base):
         cascade="all, delete-orphan",
     )
 
-    # ✅ OPTIONAL: if you want to store points edits history
     point_adjustments: Mapped[List["StudentPointAdjustment"]] = relationship(
         "StudentPointAdjustment",
         back_populates="student",
