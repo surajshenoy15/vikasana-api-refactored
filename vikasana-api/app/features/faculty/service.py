@@ -4,13 +4,14 @@ import hashlib
 import hmac
 from datetime import datetime, timezone, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
 from app.features.faculty.models import Faculty
 from app.features.faculty.models import FacultyActivationSession
-from app.features.faculty.schemas.faculty import FacultyCreateRequest
+from app.features.faculty.schemas.faculty import FacultyCreateRequest, FacultyUpdateRequest
+from app.features.organization.models import Department
 from app.core.file_storage import upload_faculty_image
 from app.core.email_service import send_activation_email, send_faculty_otp_email
 from app.core.faculty_tokens import (
@@ -80,6 +81,27 @@ async def create_faculty(
     if existing:
         raise HTTPException(status_code=409, detail="Faculty already exists with this email")
 
+    if payload.department_id is not None:
+        normalized_college = payload.college.strip().lower()
+
+        department_result = await db.execute(
+            select(Department).where(
+                Department.id == payload.department_id,
+                Department.is_active.is_(True),
+                func.lower(func.trim(Department.college)) == normalized_college,
+            )
+        )
+        department = department_result.scalar_one_or_none()
+
+        if not department:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Department must be active and belong to the same "
+                    "college as the faculty"
+                ),
+            )
+
     image_url = None
     if image_bytes and image_filename:
         image_url = await upload_faculty_image(
@@ -101,6 +123,7 @@ async def create_faculty(
         college=payload.college,
         email=payload.email,
         role=payload.role,
+        department_id=payload.department_id,
         is_active=False,
         activation_token_hash=token_hash,
         activation_expires_at=activation_expiry_dt(),
@@ -133,6 +156,137 @@ async def create_faculty(
         print(f"[WARN] Activation email not sent for {faculty.email}: {e}")
 
     return faculty, email_sent
+
+
+async def update_faculty(
+    faculty_id: int,
+    payload: FacultyUpdateRequest,
+    db: AsyncSession,
+) -> Faculty:
+    faculty_result = await db.execute(
+        select(Faculty).where(Faculty.id == faculty_id)
+    )
+    faculty = faculty_result.scalar_one_or_none()
+
+    if not faculty:
+        raise HTTPException(status_code=404, detail="Faculty not found")
+
+    fields_set = payload.model_fields_set
+
+    if not fields_set:
+        raise HTTPException(
+            status_code=400,
+            detail="No faculty fields were provided for update",
+        )
+
+    effective_college = faculty.college
+
+    if "college" in fields_set:
+        if payload.college is None:
+            raise HTTPException(
+                status_code=400,
+                detail="college cannot be null",
+            )
+
+        effective_college = payload.college.strip()
+
+        if not effective_college:
+            raise HTTPException(
+                status_code=400,
+                detail="college cannot be empty",
+            )
+
+    normalized_email = None
+
+    if "email" in fields_set:
+        if payload.email is None:
+            raise HTTPException(
+                status_code=400,
+                detail="email cannot be null",
+            )
+
+        normalized_email = str(payload.email).strip().lower()
+
+        duplicate_result = await db.execute(
+            select(Faculty).where(
+                func.lower(func.trim(Faculty.email)) == normalized_email,
+                Faculty.id != faculty_id,
+            )
+        )
+
+        if duplicate_result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=409,
+                detail="Faculty already exists with this email",
+            )
+
+    department_was_provided = "department_id" in fields_set
+    college_was_provided = "college" in fields_set
+
+    effective_department_id = (
+        payload.department_id
+        if department_was_provided
+        else faculty.department_id
+    )
+
+    if (
+        effective_department_id is not None
+        and (department_was_provided or college_was_provided)
+    ):
+        department_result = await db.execute(
+            select(Department).where(
+                Department.id == effective_department_id,
+                Department.is_active.is_(True),
+                func.lower(func.trim(Department.college))
+                == effective_college.lower(),
+            )
+        )
+
+        if not department_result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Department must be active and belong to the same "
+                    "college as the faculty"
+                ),
+            )
+
+    if "full_name" in fields_set:
+        if payload.full_name is None or not payload.full_name.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="full_name cannot be null or empty",
+            )
+
+        faculty.full_name = payload.full_name.strip()
+
+    if college_was_provided:
+        faculty.college = effective_college
+
+    if "email" in fields_set:
+        faculty.email = normalized_email
+
+    if "role" in fields_set:
+        if payload.role is None or not payload.role.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="role cannot be null or empty",
+            )
+
+        faculty.role = payload.role.strip()
+
+    if department_was_provided:
+        faculty.department_id = payload.department_id
+
+    # legacy_college_scope is deliberately preserved.
+    try:
+        await db.commit()
+        await db.refresh(faculty)
+    except Exception:
+        await db.rollback()
+        raise
+
+    return faculty
 
 
 # ==========================================================

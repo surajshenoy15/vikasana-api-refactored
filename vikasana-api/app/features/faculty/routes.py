@@ -19,6 +19,7 @@ from app.features.faculty.schemas.faculty import (
     FacultyResponse,
     ActivateFacultyResponse,
     FacultyCreateRequest,
+    FacultyUpdateRequest,
 )
 
 from app.features.faculty.schemas.faculty_import import FacultyImportResponse, FailedRow
@@ -39,6 +40,7 @@ from app.features.faculty.service import (
     verify_activation_otp,
     set_password_after_otp,
     activate_faculty,
+    update_faculty,
 )
 
 from pydantic import BaseModel
@@ -56,11 +58,18 @@ async def add_faculty(
     college: str = Form(...),
     email: str = Form(...),
     role: str = Form("faculty"),
+    department_id: int | None = Form(None),
     image: UploadFile | None = File(None),
     db: AsyncSession = Depends(get_db),
     admin: Admin = Depends(get_current_admin),
 ):
-    payload = FacultyCreateRequest(full_name=full_name, college=college, email=email, role=role)
+    payload = FacultyCreateRequest(
+        full_name=full_name,
+        college=college,
+        email=email,
+        role=role,
+        department_id=department_id,
+    )
 
     image_bytes = None
     if image:
@@ -127,6 +136,18 @@ async def import_faculty_csv(
             college = (row.get("college") or "").strip()
             role = (row.get("role") or "faculty").strip() or "faculty"
 
+            raw_department_id = (row.get("department_id") or "").strip()
+            department_id: int | None = None
+
+            if raw_department_id:
+                try:
+                    department_id = int(raw_department_id)
+                except ValueError:
+                    raise ValueError("department_id must be a positive integer")
+
+                if department_id <= 0:
+                    raise ValueError("department_id must be a positive integer")
+
             if not full_name:
                 raise ValueError("full_name is required")
             if not email or "@" not in email:
@@ -138,7 +159,13 @@ async def import_faculty_csv(
             if existing.scalar_one_or_none():
                 raise ValueError("email already exists")
 
-            payload = FacultyCreateRequest(full_name=full_name, college=college, email=email, role=role)
+            payload = FacultyCreateRequest(
+                full_name=full_name,
+                college=college,
+                email=email,
+                role=role,
+                department_id=department_id,
+            )
 
             faculty, email_sent = await create_faculty(
                 payload=payload,
@@ -173,6 +200,25 @@ async def list_faculty(
     q = await db.execute(select(Faculty).order_by(Faculty.created_at.desc()))
     items = q.scalars().all()
     return [FacultyResponse.model_validate(x) for x in items]
+
+
+@router.patch(
+    "/{faculty_id}",
+    response_model=FacultyResponse,
+    summary="Update faculty member (Admin only)",
+)
+async def patch_faculty(
+    faculty_id: int,
+    body: FacultyUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(get_current_admin),
+):
+    faculty = await update_faculty(
+        faculty_id=faculty_id,
+        payload=body,
+        db=db,
+    )
+    return FacultyResponse.model_validate(faculty)
 
 
 @router.delete("/{faculty_id}", summary="Delete faculty member (Admin only)")

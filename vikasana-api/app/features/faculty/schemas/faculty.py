@@ -7,6 +7,15 @@ class FacultyCreateRequest(BaseModel):
     college: str = Field(..., max_length=200)
     email: EmailStr
     role: str = "faculty"
+    department_id: int | None = Field(default=None, ge=1)
+
+
+class FacultyUpdateRequest(BaseModel):
+    full_name: str | None = Field(default=None, min_length=1, max_length=150)
+    college: str | None = Field(default=None, min_length=1, max_length=200)
+    email: EmailStr | None = None
+    role: str | None = Field(default=None, min_length=1, max_length=50)
+    department_id: int | None = Field(default=None, ge=1)
 
 
 class FacultyResponse(BaseModel):
@@ -18,6 +27,8 @@ class FacultyResponse(BaseModel):
     is_active: bool
     image_url: str | None = None
     created_at: datetime
+    department_id: int | None = None
+    legacy_college_scope: bool = False
 
     class Config:
         from_attributes = True
