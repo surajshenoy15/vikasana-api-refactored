@@ -407,6 +407,311 @@ async def validate_student_academic_assignment(
     return department, batch, assigned_faculty
 
 
+
+async def apply_student_assignment_update(
+    *,
+    db: AsyncSession,
+    student: Student,
+    assignment_data: dict[str, int | None],
+    changed_by_faculty_id: int | None = None,
+    changed_by_admin_id: int | None = None,
+    reason: str = "Student assignment workflow update",
+) -> Student:
+    """
+    Apply a validated academic/faculty assignment update.
+
+    The function mutates the supplied Student ORM object and adds
+    assignment-history records through the existing Stage 5 helper.
+
+    It deliberately does not commit or refresh the session so that
+    single and bulk assignment routes can control the transaction.
+    """
+    from fastapi import HTTPException
+
+    academic_fields = {
+        "department_id",
+        "batch_id",
+        "current_year",
+        "assigned_faculty_id",
+    }
+
+    if not assignment_data:
+        raise HTTPException(
+            status_code=400,
+            detail="No student assignment fields provided",
+        )
+
+    unsupported_fields = (
+        set(assignment_data) - academic_fields
+    )
+
+    if unsupported_fields:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported student assignment fields: "
+                + ", ".join(sorted(unsupported_fields))
+            ),
+        )
+
+    previous_department_id = student.department_id
+    previous_batch_id = student.batch_id
+    previous_current_year = student.current_year
+    previous_assigned_faculty_id = (
+        student.assigned_faculty_id
+    )
+
+    target_department_id = assignment_data.get(
+        "department_id",
+        student.department_id,
+    )
+    target_batch_id = assignment_data.get(
+        "batch_id",
+        student.batch_id,
+    )
+    target_current_year = assignment_data.get(
+        "current_year",
+        student.current_year,
+    )
+    target_assigned_faculty_id = assignment_data.get(
+        "assigned_faculty_id",
+        student.assigned_faculty_id,
+    )
+
+    has_academic_assignment = any(
+        value is not None
+        for value in (
+            target_department_id,
+            target_batch_id,
+            target_current_year,
+            target_assigned_faculty_id,
+        )
+    )
+
+    if has_academic_assignment:
+        await validate_student_academic_assignment(
+            db=db,
+            college=student.college,
+            department_id=target_department_id,
+            batch_id=target_batch_id,
+            current_year=target_current_year,
+            assigned_faculty_id=target_assigned_faculty_id,
+        )
+
+    for field_name, value in assignment_data.items():
+        setattr(student, field_name, value)
+
+    normalized_reason = str(reason or "").strip()
+
+    if not normalized_reason:
+        normalized_reason = (
+            "Student assignment workflow update"
+        )
+
+    record_student_assignment_history(
+        db=db,
+        student=student,
+        previous_department_id=previous_department_id,
+        new_department_id=student.department_id,
+        previous_batch_id=previous_batch_id,
+        new_batch_id=student.batch_id,
+        previous_year=previous_current_year,
+        new_year=student.current_year,
+        previous_faculty_id=previous_assigned_faculty_id,
+        new_faculty_id=student.assigned_faculty_id,
+        changed_by_faculty_id=changed_by_faculty_id,
+        changed_by_admin_id=changed_by_admin_id,
+        reason=normalized_reason,
+    )
+
+    return student
+
+
+async def apply_bulk_student_assignment_update(
+    *,
+    db: AsyncSession,
+    students: list[Student],
+    assignment_data: dict[str, int | None],
+    changed_by_faculty_id: int | None = None,
+    changed_by_admin_id: int | None = None,
+    reason: str = "Bulk student assignment workflow update",
+) -> list[Student]:
+    """
+    Apply the same assignment update to multiple students.
+
+    All target assignments are validated before any Student object
+    is mutated. This prevents partial in-memory updates when a later
+    student fails validation.
+
+    The function adds assignment-history records but deliberately
+    does not commit or refresh the database session.
+    """
+    from fastapi import HTTPException
+
+    academic_fields = {
+        "department_id",
+        "batch_id",
+        "current_year",
+        "assigned_faculty_id",
+    }
+
+    if not students:
+        raise HTTPException(
+            status_code=400,
+            detail="No students provided for bulk assignment",
+        )
+
+    if not assignment_data:
+        raise HTTPException(
+            status_code=400,
+            detail="No student assignment fields provided",
+        )
+
+    unsupported_fields = (
+        set(assignment_data) - academic_fields
+    )
+
+    if unsupported_fields:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported student assignment fields: "
+                + ", ".join(sorted(unsupported_fields))
+            ),
+        )
+
+    student_ids = [
+        getattr(student, "id", None)
+        for student in students
+    ]
+
+    concrete_student_ids = [
+        student_id
+        for student_id in student_ids
+        if student_id is not None
+    ]
+
+    if len(concrete_student_ids) != len(
+        set(concrete_student_ids)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Duplicate students provided for "
+                "bulk assignment"
+            ),
+        )
+
+    assignment_targets = []
+
+    # First pass: calculate and validate every final state.
+    # No Student object is mutated during this pass.
+    for student in students:
+        target_department_id = assignment_data.get(
+            "department_id",
+            student.department_id,
+        )
+        target_batch_id = assignment_data.get(
+            "batch_id",
+            student.batch_id,
+        )
+        target_current_year = assignment_data.get(
+            "current_year",
+            student.current_year,
+        )
+        target_assigned_faculty_id = assignment_data.get(
+            "assigned_faculty_id",
+            student.assigned_faculty_id,
+        )
+
+        has_academic_assignment = any(
+            value is not None
+            for value in (
+                target_department_id,
+                target_batch_id,
+                target_current_year,
+                target_assigned_faculty_id,
+            )
+        )
+
+        if has_academic_assignment:
+            await validate_student_academic_assignment(
+                db=db,
+                college=student.college,
+                department_id=target_department_id,
+                batch_id=target_batch_id,
+                current_year=target_current_year,
+                assigned_faculty_id=(
+                    target_assigned_faculty_id
+                ),
+            )
+
+        assignment_targets.append(
+            (
+                student,
+                target_department_id,
+                target_batch_id,
+                target_current_year,
+                target_assigned_faculty_id,
+            )
+        )
+
+    normalized_reason = str(reason or "").strip()
+
+    if not normalized_reason:
+        normalized_reason = (
+            "Bulk student assignment workflow update"
+        )
+
+    # Second pass: mutate only after every student passed validation.
+    for (
+        student,
+        target_department_id,
+        target_batch_id,
+        target_current_year,
+        target_assigned_faculty_id,
+    ) in assignment_targets:
+        previous_department_id = student.department_id
+        previous_batch_id = student.batch_id
+        previous_current_year = student.current_year
+        previous_assigned_faculty_id = (
+            student.assigned_faculty_id
+        )
+
+        student.department_id = target_department_id
+        student.batch_id = target_batch_id
+        student.current_year = target_current_year
+        student.assigned_faculty_id = (
+            target_assigned_faculty_id
+        )
+
+        record_student_assignment_history(
+            db=db,
+            student=student,
+            previous_department_id=(
+                previous_department_id
+            ),
+            new_department_id=student.department_id,
+            previous_batch_id=previous_batch_id,
+            new_batch_id=student.batch_id,
+            previous_year=previous_current_year,
+            new_year=student.current_year,
+            previous_faculty_id=(
+                previous_assigned_faculty_id
+            ),
+            new_faculty_id=student.assigned_faculty_id,
+            changed_by_faculty_id=(
+                changed_by_faculty_id
+            ),
+            changed_by_admin_id=changed_by_admin_id,
+            reason=normalized_reason,
+        )
+
+    return students
+
+
+
+
 async def create_student(
     db: AsyncSession,
     payload: StudentCreate,

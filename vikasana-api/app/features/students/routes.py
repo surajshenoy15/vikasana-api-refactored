@@ -45,6 +45,14 @@ from app.features.students.schemas.student import (
     StudentPointAdjustmentWriteResponse,
 )
 
+from app.features.organization.service import require_department_architecture_enabled
+from app.features.students.schemas.assignment import StudentAssignmentUpdateRequest
+from app.features.students.service import apply_student_assignment_update
+
+from app.features.students.schemas.assignment import StudentBulkAssignmentRequest
+from app.features.students.schemas.assignment import StudentBulkAssignmentResponse
+from app.features.students.service import apply_bulk_student_assignment_update
+
 
 # ─────────────────────────────────────────────────────────────
 # PATCH SCHEMA
@@ -739,6 +747,216 @@ async def update_student_admin(
         activities_count=int(activities_count),
         certificates_count=int(certificates_count),
     )
+@admin_router.patch(
+    '/assignment/bulk',
+    response_model=StudentBulkAssignmentResponse,
+)
+async def update_students_assignment_bulk_admin(
+    payload: StudentBulkAssignmentRequest,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    """
+    Apply one academic/faculty assignment update to many students.
+
+    Every student must exist. Department architecture must be
+    enabled for every involved college. The service validates all
+    final states before mutating any student.
+    """
+    result = await db.execute(
+        select(Student)
+        .options(
+            selectinload(
+                Student.created_by_faculty
+            )
+        )
+        .where(
+            Student.id.in_(
+                payload.student_ids
+            )
+        )
+    )
+
+    found_students = list(
+        result.scalars().all()
+    )
+
+    students_by_id = {
+        student.id: student
+        for student in found_students
+    }
+
+    missing_student_ids = [
+        student_id
+        for student_id in payload.student_ids
+        if student_id not in students_by_id
+    ]
+
+    if missing_student_ids:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "Students not found",
+                "student_ids": missing_student_ids,
+            },
+        )
+
+    students = [
+        students_by_id[student_id]
+        for student_id in payload.student_ids
+    ]
+
+    checked_colleges = set()
+
+    for student in students:
+        college_key = str(
+            student.college or ""
+        ).strip().casefold()
+
+        if college_key in checked_colleges:
+            continue
+
+        await require_department_architecture_enabled(
+            db,
+            student.college,
+        )
+
+        checked_colleges.add(college_key)
+
+    assignment_data = payload.model_dump(
+        exclude_unset=True,
+        exclude={"student_ids"},
+    )
+
+    await apply_bulk_student_assignment_update(
+        db=db,
+        students=students,
+        assignment_data=assignment_data,
+        changed_by_admin_id=getattr(
+            current_admin,
+            "id",
+            None,
+        ),
+        reason=(
+            "Admin bulk student assignment workflow"
+        ),
+    )
+
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    return StudentBulkAssignmentResponse(
+        updated_count=len(students),
+        student_ids=[
+            student.id
+            for student in students
+        ],
+    )
+
+
+
+
+@admin_router.patch(
+    '/{student_id}/assignment',
+    response_model=StudentOut,
+)
+async def update_student_assignment_admin(
+    student_id: int,
+    payload: StudentAssignmentUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    """
+    Apply an academic or faculty assignment update to one student.
+
+    Department architecture must be enabled for the student's
+    college. The assignment service performs validation and adds
+    assignment history without committing independently.
+    """
+    result = await db.execute(
+        select(Student)
+        .options(
+            selectinload(
+                Student.created_by_faculty
+            )
+        )
+        .where(Student.id == student_id)
+    )
+
+    student = result.scalar_one_or_none()
+
+    if student is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Student not found",
+        )
+
+    await require_department_architecture_enabled(
+        db,
+        student.college,
+    )
+
+    assignment_data = payload.model_dump(
+        exclude_unset=True,
+    )
+
+    await apply_student_assignment_update(
+        db=db,
+        student=student,
+        assignment_data=assignment_data,
+        changed_by_admin_id=getattr(
+            current_admin,
+            "id",
+            None,
+        ),
+        reason=(
+            "Admin student assignment workflow"
+        ),
+    )
+
+    await db.commit()
+    await db.refresh(student)
+
+    activity_result = await db.execute(
+        select(
+            func.count(EventSubmission.id)
+        ).where(
+            EventSubmission.student_id
+            == student.id
+        )
+    )
+
+    activities_count = (
+        activity_result.scalar() or 0
+    )
+
+    certificate_result = await db.execute(
+        select(
+            func.count(Certificate.id)
+        ).where(
+            Certificate.student_id
+            == student.id
+        )
+    )
+
+    certificates_count = (
+        certificate_result.scalar() or 0
+    )
+
+    return _student_out(
+        student,
+        activities_count=int(
+            activities_count
+        ),
+        certificates_count=int(
+            certificates_count
+        ),
+    )
+
+
 
 @admin_router.delete("/{student_id}")
 async def delete_student_admin(

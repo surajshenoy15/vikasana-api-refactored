@@ -81,6 +81,41 @@ async def _find_organization_settings(
     return result.scalar_one_or_none()
 
 
+async def require_department_architecture_enabled(
+    db: AsyncSession,
+    college: str,
+) -> CollegeOrganizationSetting:
+    """
+    Return the college organization settings when department mode
+    is enabled.
+
+    This helper performs only a read query. It does not create,
+    update, commit, or refresh any database record.
+    """
+    from fastapi import HTTPException, status
+
+    normalized_college = normalize_college(college)
+
+    settings = await _find_organization_settings(
+        db,
+        normalized_college,
+    )
+
+    if (
+        settings is None
+        or not settings.department_architecture_enabled
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Department architecture is not enabled "
+                "for this college"
+            ),
+        )
+
+    return settings
+
+
 async def get_organization_settings(
     db: AsyncSession,
     college: str,
