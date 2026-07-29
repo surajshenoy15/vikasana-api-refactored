@@ -18,7 +18,12 @@ from app.core.minio_client import get_minio
 # ✅ FIX: Required for /students/me visible points calculation
 from app.features.activities.models import ActivitySession, ActivityType
 from app.features.face.models import StudentFaceEmbedding, StudentFaceEnrollmentImage
-from app.features.students.service import create_student, create_students_from_csv
+from app.features.students.service import (
+    create_student,
+    create_students_from_csv,
+    record_student_assignment_history,
+    validate_student_academic_assignment,
+)
 from app.features.students.points_service import (
     get_student_point_adjustments,
     create_student_point_adjustment,
@@ -53,6 +58,12 @@ class StudentUpdate(BaseModel):
     student_type: Optional[str] = None
     passout_year: Optional[int] = None
     admitted_year: Optional[int] = None
+
+    # Optional department-wise academic assignments.
+    department_id: Optional[int] = None
+    batch_id: Optional[int] = None
+    current_year: Optional[int] = None
+    assigned_faculty_id: Optional[int] = None
 
 
 class StudentPointsUpdate(BaseModel):
@@ -99,6 +110,11 @@ def _student_out(
 
         # ✅ Soft delete status
         is_active=bool(getattr(s, "is_active", True)),
+
+        department_id=s.department_id,
+        batch_id=s.batch_id,
+        current_year=s.current_year,
+        assigned_faculty_id=s.assigned_faculty_id,
     )
 
 def _point_item_out(item) -> StudentPointAdjustmentOut:
@@ -246,6 +262,7 @@ async def add_student_manual(
             payload,
             faculty_college=current_faculty.college,
             faculty_id=current_faculty.id,
+            changed_by_faculty_id=current_faculty.id,
         )
 
         return _student_out(s, activities_count=0, certificates_count=0)
@@ -272,6 +289,7 @@ async def add_students_bulk(
         skip_duplicates=skip_duplicates,
         faculty_college=current_faculty.college,
         faculty_id=current_faculty.id,
+        changed_by_faculty_id=current_faculty.id,
     )
 
     return BulkUploadResult(
@@ -301,6 +319,7 @@ async def add_student_manual_admin(
             payload,
             faculty_college=getattr(payload, "college", None) or getattr(payload, "college_name", None) or "BNMIT",
             faculty_id=None,
+            changed_by_admin_id=current_admin.id,
         )
 
         return _student_out(s, activities_count=0, certificates_count=0)
@@ -328,6 +347,7 @@ async def add_students_bulk_admin(
     skip_duplicates=skip_duplicates,
     faculty_college=college,
     faculty_id=None,
+    changed_by_admin_id=current_admin.id,
     allow_csv_college=True,
     allow_csv_faculty_email=True,
 )
@@ -569,6 +589,17 @@ async def update_student_admin(
 
     data = payload.model_dump(exclude_unset=True)
 
+    if not data:
+        raise HTTPException(
+            status_code=400,
+            detail="No student fields provided for update",
+        )
+
+    previous_department_id = s.department_id
+    previous_batch_id = s.batch_id
+    previous_current_year = s.current_year
+    previous_assigned_faculty_id = s.assigned_faculty_id
+
     if "name" in data and data["name"] is not None:
         data["name"] = str(data["name"]).strip()
 
@@ -603,11 +634,90 @@ async def update_student_admin(
         if dup.scalar_one_or_none():
             raise HTTPException(status_code=409, detail="Email already exists")
 
-    for k, v in data.items():
-        if v is None:
+    academic_fields = {
+        "department_id",
+        "batch_id",
+        "current_year",
+        "assigned_faculty_id",
+    }
+
+    academic_update_requested = bool(
+        academic_fields.intersection(data)
+    )
+
+    college_update_requested = "college" in data
+
+    if academic_update_requested or college_update_requested:
+        target_college = data.get("college", s.college)
+        target_department_id = data.get(
+            "department_id",
+            s.department_id,
+        )
+        target_batch_id = data.get(
+            "batch_id",
+            s.batch_id,
+        )
+        target_current_year = data.get(
+            "current_year",
+            s.current_year,
+        )
+        target_assigned_faculty_id = data.get(
+            "assigned_faculty_id",
+            s.assigned_faculty_id,
+        )
+
+        has_academic_assignment = any(
+            value is not None
+            for value in (
+                target_department_id,
+                target_batch_id,
+                target_current_year,
+                target_assigned_faculty_id,
+            )
+        )
+
+        if has_academic_assignment:
+            await validate_student_academic_assignment(
+                db=db,
+                college=target_college,
+                department_id=target_department_id,
+                batch_id=target_batch_id,
+                current_year=target_current_year,
+                assigned_faculty_id=(
+                    target_assigned_faculty_id
+                ),
+            )
+
+    for key, value in data.items():
+        # Preserve the existing behaviour for legacy fields:
+        # null does not clear name, email, college, USN, etc.
+        #
+        # Academic assignment fields are nullable, so explicit
+        # null clears them while omitted fields remain unchanged.
+        if value is None and key not in academic_fields:
             continue
 
-        setattr(s, k, v)
+        setattr(s, key, value)
+
+    if academic_update_requested:
+        record_student_assignment_history(
+            db=db,
+            student=s,
+            previous_department_id=previous_department_id,
+            new_department_id=s.department_id,
+            previous_batch_id=previous_batch_id,
+            new_batch_id=s.batch_id,
+            previous_year=previous_current_year,
+            new_year=s.current_year,
+            previous_faculty_id=previous_assigned_faculty_id,
+            new_faculty_id=s.assigned_faculty_id,
+            changed_by_admin_id=getattr(
+                current_admin,
+                "id",
+                None,
+            ),
+            reason="Admin student academic assignment update",
+        )
 
     await db.commit()
     await db.refresh(s)

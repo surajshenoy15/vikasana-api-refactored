@@ -21,6 +21,13 @@ class StudentCreate(BaseModel):
     college: str | None = "BNMIT"
     faculty_mentor: str | None = None
 
+    # Optional department-wise academic assignments.
+    # Existing creation requests remain valid without these fields.
+    department_id: int | None = Field(default=None, ge=1)
+    batch_id: int | None = Field(default=None, ge=1)
+    current_year: int | None = Field(default=None, ge=1, le=8)
+    assigned_faculty_id: int | None = Field(default=None, ge=1)
+
     passout_year: int = Field(..., ge=1990, le=2100)
     admitted_year: int = Field(..., ge=1990, le=2100)
 
@@ -39,6 +46,12 @@ class StudentOut(BaseModel):
 
     college: str | None = None
     faculty_mentor_name: str | None = None
+
+    # Additive department-wise response fields.
+    department_id: int | None = None
+    batch_id: int | None = None
+    current_year: int | None = None
+    assigned_faculty_id: int | None = None
 
     activities_count: int = 0
     certificates_count: int = 0

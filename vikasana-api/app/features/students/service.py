@@ -107,12 +107,314 @@ def _normalize_csv_headers(fieldnames: list[str] | None) -> tuple[dict[str, str]
     return field_map, set(field_map.keys())
 
 
+
+def record_student_assignment_history(
+    *,
+    db: AsyncSession,
+    student: Student,
+    previous_department_id: int | None,
+    new_department_id: int | None,
+    previous_batch_id: int | None,
+    new_batch_id: int | None,
+    previous_year: int | None,
+    new_year: int | None,
+    previous_faculty_id: int | None,
+    new_faculty_id: int | None,
+    changed_by_faculty_id: int | None = None,
+    changed_by_admin_id: int | None = None,
+    reason: str | None = None,
+):
+    """
+    Add academic and faculty-assignment history records when values
+    genuinely change.
+
+    This helper does not flush or commit the database transaction.
+    """
+    from app.features.organization.models import (
+        StudentAcademicHistory,
+        StudentFacultyAssignment,
+    )
+
+    academic_history = None
+    faculty_history = None
+
+    academic_changed = any(
+        previous != current
+        for previous, current in (
+            (
+                previous_department_id,
+                new_department_id,
+            ),
+            (
+                previous_batch_id,
+                new_batch_id,
+            ),
+            (
+                previous_year,
+                new_year,
+            ),
+        )
+    )
+
+    if academic_changed:
+        previous_values = (
+            previous_department_id,
+            previous_batch_id,
+            previous_year,
+        )
+        new_values = (
+            new_department_id,
+            new_batch_id,
+            new_year,
+        )
+
+        if (
+            all(value is None for value in previous_values)
+            and any(value is not None for value in new_values)
+        ):
+            academic_action = "ACADEMIC_ASSIGNED"
+        elif (
+            any(value is not None for value in previous_values)
+            and all(value is None for value in new_values)
+        ):
+            academic_action = "ACADEMIC_CLEARED"
+        else:
+            academic_action = "ACADEMIC_UPDATED"
+
+        academic_history = StudentAcademicHistory(
+            student=student,
+            action=academic_action,
+            from_department_id=previous_department_id,
+            to_department_id=new_department_id,
+            from_batch_id=previous_batch_id,
+            to_batch_id=new_batch_id,
+            from_year=previous_year,
+            to_year=new_year,
+            reason=reason,
+            changed_by_faculty_id=changed_by_faculty_id,
+            changed_by_admin_id=changed_by_admin_id,
+        )
+
+        db.add(academic_history)
+
+    if previous_faculty_id != new_faculty_id:
+        if (
+            previous_faculty_id is None
+            and new_faculty_id is not None
+        ):
+            faculty_action = "ASSIGNED"
+        elif (
+            previous_faculty_id is not None
+            and new_faculty_id is None
+        ):
+            faculty_action = "UNASSIGNED"
+        else:
+            faculty_action = "REASSIGNED"
+
+        faculty_history = StudentFacultyAssignment(
+            student=student,
+            previous_faculty_id=previous_faculty_id,
+            assigned_faculty_id=new_faculty_id,
+            action=faculty_action,
+            assigned_by_faculty_id=changed_by_faculty_id,
+            assigned_by_admin_id=changed_by_admin_id,
+            note=reason,
+        )
+
+        db.add(faculty_history)
+
+    return academic_history, faculty_history
+
+
+def _parse_optional_csv_int(
+    *,
+    row: dict,
+    field_map: dict[str, str],
+    headers: set[str],
+    field_name: str,
+    minimum: int = 1,
+    maximum: int | None = None,
+) -> int | None:
+    """Parse an optional integer CSV field with clear row errors."""
+    if field_name not in headers:
+        return None
+
+    raw_value = _clean(
+        row.get(field_map[field_name], "")
+    )
+
+    if not raw_value:
+        return None
+
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{field_name} must be an integer"
+        ) from exc
+
+    if value < minimum:
+        raise ValueError(
+            f"{field_name} must be at least {minimum}"
+        )
+
+    if maximum is not None and value > maximum:
+        raise ValueError(
+            f"{field_name} must not exceed {maximum}"
+        )
+
+    return value
+
+
+async def validate_student_academic_assignment(
+    *,
+    db: AsyncSession,
+    college: str,
+    department_id: int | None = None,
+    batch_id: int | None = None,
+    current_year: int | None = None,
+    assigned_faculty_id: int | None = None,
+):
+    """
+    Validate optional department-wise student assignments.
+
+    This helper performs only read queries. It does not modify or commit
+    student, department, batch, or faculty records.
+    """
+    from fastapi import HTTPException
+    from sqlalchemy import select
+
+    from app.features.faculty.models import Faculty
+    from app.features.organization.models import (
+        AcademicBatch,
+        Department,
+    )
+
+    college_value = _clean(college)
+
+    if not college_value:
+        raise HTTPException(
+            status_code=400,
+            detail="Student college is required for academic assignment",
+        )
+
+    if current_year is not None and not 1 <= current_year <= 8:
+        raise HTTPException(
+            status_code=400,
+            detail="current_year must be between 1 and 8",
+        )
+
+    department = None
+    batch = None
+    assigned_faculty = None
+
+    if department_id is not None:
+        department_result = await db.execute(
+            select(Department).where(
+                Department.id == department_id,
+                Department.college == college_value,
+                Department.is_active.is_(True),
+            )
+        )
+        department = department_result.scalar_one_or_none()
+
+        if department is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Department must be active and belong to the "
+                    "same college as the student"
+                ),
+            )
+
+    if batch_id is not None:
+        batch_result = await db.execute(
+            select(AcademicBatch).where(
+                AcademicBatch.id == batch_id,
+                AcademicBatch.college == college_value,
+                AcademicBatch.is_active.is_(True),
+            )
+        )
+        batch = batch_result.scalar_one_or_none()
+
+        if batch is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Academic batch must be active and belong to the "
+                    "same college as the student"
+                ),
+            )
+
+        duration = getattr(
+            batch,
+            "course_duration_years",
+            None,
+        )
+
+        if (
+            current_year is not None
+            and duration is not None
+            and current_year > duration
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "current_year cannot exceed the selected batch "
+                    "course duration"
+                ),
+            )
+
+    if assigned_faculty_id is not None:
+        if department_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "department_id is required when "
+                    "assigned_faculty_id is provided"
+                ),
+            )
+
+        faculty_result = await db.execute(
+            select(Faculty).where(
+                Faculty.id == assigned_faculty_id,
+                Faculty.college == college_value,
+                Faculty.is_active.is_(True),
+            )
+        )
+        assigned_faculty = (
+            faculty_result.scalar_one_or_none()
+        )
+
+        if assigned_faculty is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Assigned faculty must be active and belong to "
+                    "the same college as the student"
+                ),
+            )
+
+        if assigned_faculty.department_id != department_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Assigned faculty must belong to the student's "
+                    "selected department"
+                ),
+            )
+
+    return department, batch, assigned_faculty
+
+
 async def create_student(
     db: AsyncSession,
     payload: StudentCreate,
     *,
     faculty_college: str,
     faculty_id: int | None = None,
+    changed_by_faculty_id: int | None = None,
+    changed_by_admin_id: int | None = None,
 ) -> Student:
     faculty_college = (faculty_college or "").strip()
 
@@ -148,6 +450,78 @@ async def create_student(
             raise ValueError(f"Duplicate USN in this college: {usn}")
         raise ValueError(f"Duplicate Email in this college: {email}")
 
+    academic_fields_set = {
+        "department_id",
+        "batch_id",
+        "current_year",
+        "assigned_faculty_id",
+    }.intersection(payload.model_fields_set)
+
+    if inactive_existing:
+        previous_department_id = inactive_existing.department_id
+        previous_batch_id = inactive_existing.batch_id
+        previous_current_year = inactive_existing.current_year
+        previous_assigned_faculty_id = (
+            inactive_existing.assigned_faculty_id
+        )
+
+        target_department_id = (
+            payload.department_id
+            if "department_id" in payload.model_fields_set
+            else previous_department_id
+        )
+        target_batch_id = (
+            payload.batch_id
+            if "batch_id" in payload.model_fields_set
+            else previous_batch_id
+        )
+        target_current_year = (
+            payload.current_year
+            if "current_year" in payload.model_fields_set
+            else previous_current_year
+        )
+        target_assigned_faculty_id = (
+            payload.assigned_faculty_id
+            if "assigned_faculty_id" in payload.model_fields_set
+            else previous_assigned_faculty_id
+        )
+
+        should_validate_assignment = bool(
+            academic_fields_set
+        )
+    else:
+        previous_department_id = None
+        previous_batch_id = None
+        previous_current_year = None
+        previous_assigned_faculty_id = None
+
+        target_department_id = payload.department_id
+        target_batch_id = payload.batch_id
+        target_current_year = payload.current_year
+        target_assigned_faculty_id = (
+            payload.assigned_faculty_id
+        )
+
+        should_validate_assignment = any(
+            value is not None
+            for value in (
+                target_department_id,
+                target_batch_id,
+                target_current_year,
+                target_assigned_faculty_id,
+            )
+        )
+
+    if should_validate_assignment:
+        await validate_student_academic_assignment(
+            db=db,
+            college=faculty_college,
+            department_id=target_department_id,
+            batch_id=target_batch_id,
+            current_year=target_current_year,
+            assigned_faculty_id=target_assigned_faculty_id,
+        )
+
     # ✅ Permanent fix: restore deleted/deactivated student
     if inactive_existing:
         _reactivate_student(
@@ -161,6 +535,29 @@ async def create_student(
             passout_year=payload.passout_year,
             admitted_year=payload.admitted_year,
             faculty_id=faculty_id,
+        )
+
+        inactive_existing.department_id = target_department_id
+        inactive_existing.batch_id = target_batch_id
+        inactive_existing.current_year = target_current_year
+        inactive_existing.assigned_faculty_id = (
+            target_assigned_faculty_id
+        )
+
+        record_student_assignment_history(
+            db=db,
+            student=inactive_existing,
+            previous_department_id=previous_department_id,
+            new_department_id=target_department_id,
+            previous_batch_id=previous_batch_id,
+            new_batch_id=target_batch_id,
+            previous_year=previous_current_year,
+            new_year=target_current_year,
+            previous_faculty_id=previous_assigned_faculty_id,
+            new_faculty_id=target_assigned_faculty_id,
+            changed_by_faculty_id=changed_by_faculty_id,
+            changed_by_admin_id=changed_by_admin_id,
+            reason="Student reactivation academic assignment",
         )
 
         await db.commit()
@@ -181,11 +578,32 @@ async def create_student(
         total_points_earned=0,
         passout_year=payload.passout_year,
         admitted_year=payload.admitted_year,
+        department_id=target_department_id,
+        batch_id=target_batch_id,
+        current_year=target_current_year,
+        assigned_faculty_id=target_assigned_faculty_id,
         created_by_faculty_id=faculty_id,
         is_active=True,
     )
 
     db.add(s)
+
+    record_student_assignment_history(
+        db=db,
+        student=s,
+        previous_department_id=None,
+        new_department_id=target_department_id,
+        previous_batch_id=None,
+        new_batch_id=target_batch_id,
+        previous_year=None,
+        new_year=target_current_year,
+        previous_faculty_id=None,
+        new_faculty_id=target_assigned_faculty_id,
+        changed_by_faculty_id=changed_by_faculty_id,
+        changed_by_admin_id=changed_by_admin_id,
+        reason="Initial student academic assignment",
+    )
+
     await db.commit()
     await db.refresh(s)
 
@@ -201,6 +619,8 @@ async def create_students_from_csv(
     *,
     faculty_college: str,
     faculty_id: int | None = None,
+    changed_by_faculty_id: int | None = None,
+    changed_by_admin_id: int | None = None,
     allow_csv_college: bool = False,
     allow_csv_faculty_email: bool = False,
 ) -> Tuple[int, int, int, int, List[str]]:
@@ -210,6 +630,13 @@ async def create_students_from_csv(
 
     Admin upload CSV:
       name,email,usn,branch,college,student_type,admitted_year,passout_year,faculty_email
+
+    Optional academic headers for either flow:
+      department_id,batch_id,current_year,assigned_faculty_id
+
+    faculty_email controls creation ownership through
+    created_by_faculty_id. assigned_faculty_id is a separate
+    current academic assignment.
 
     Permanent duplicate behavior:
       - Active existing student => skip / duplicate
@@ -358,12 +785,117 @@ async def create_students_from_csv(
 
             stype = _parse_student_type(stype_raw)
 
-            # ✅ Permanent fix:
-            # If same USN/email exists but inactive, restore that student instead of skipping.
+            department_id = _parse_optional_csv_int(
+                row=row,
+                field_map=field_map,
+                headers=headers,
+                field_name="department_id",
+            )
+            batch_id = _parse_optional_csv_int(
+                row=row,
+                field_map=field_map,
+                headers=headers,
+                field_name="batch_id",
+            )
+            current_year = _parse_optional_csv_int(
+                row=row,
+                field_map=field_map,
+                headers=headers,
+                field_name="current_year",
+                maximum=8,
+            )
+            assigned_faculty_id = _parse_optional_csv_int(
+                row=row,
+                field_map=field_map,
+                headers=headers,
+                field_name="assigned_faculty_id",
+            )
+
+            academic_headers = {
+                "department_id",
+                "batch_id",
+                "current_year",
+                "assigned_faculty_id",
+            }.intersection(headers)
+
+            # If the matching student is inactive, omitted CSV columns
+            # preserve the existing academic assignment. A present but
+            # blank optional column explicitly clears that field.
             inactive_student = (
                 inactive_by_usn.get((college_key, usn_key))
                 or inactive_by_email.get((college_key, email_key))
             )
+
+            if inactive_student:
+                previous_department_id = (
+                    inactive_student.department_id
+                )
+                previous_batch_id = inactive_student.batch_id
+                previous_current_year = (
+                    inactive_student.current_year
+                )
+                previous_assigned_faculty_id = (
+                    inactive_student.assigned_faculty_id
+                )
+
+                target_department_id = (
+                    department_id
+                    if "department_id" in headers
+                    else previous_department_id
+                )
+                target_batch_id = (
+                    batch_id
+                    if "batch_id" in headers
+                    else previous_batch_id
+                )
+                target_current_year = (
+                    current_year
+                    if "current_year" in headers
+                    else previous_current_year
+                )
+                target_assigned_faculty_id = (
+                    assigned_faculty_id
+                    if "assigned_faculty_id" in headers
+                    else previous_assigned_faculty_id
+                )
+            else:
+                previous_department_id = None
+                previous_batch_id = None
+                previous_current_year = None
+                previous_assigned_faculty_id = None
+
+                target_department_id = department_id
+                target_batch_id = batch_id
+                target_current_year = current_year
+                target_assigned_faculty_id = assigned_faculty_id
+
+            should_validate_assignment = bool(
+                academic_headers
+            ) and any(
+                value is not None
+                for value in (
+                    target_department_id,
+                    target_batch_id,
+                    target_current_year,
+                    target_assigned_faculty_id,
+                )
+            )
+
+            if should_validate_assignment:
+                await validate_student_academic_assignment(
+                    db=db,
+                    college=row_college,
+                    department_id=target_department_id,
+                    batch_id=target_batch_id,
+                    current_year=target_current_year,
+                    assigned_faculty_id=(
+                        target_assigned_faculty_id
+                    ),
+                )
+
+            # ✅ Permanent fix:
+            # If same USN/email exists but inactive, restore that
+            # student instead of skipping.
 
             if inactive_student:
                 _reactivate_student(
@@ -377,6 +909,42 @@ async def create_students_from_csv(
                     passout_year=passout_year,
                     admitted_year=admitted_year,
                     faculty_id=row_faculty_id,
+                )
+
+                inactive_student.department_id = (
+                    target_department_id
+                )
+                inactive_student.batch_id = target_batch_id
+                inactive_student.current_year = target_current_year
+                inactive_student.assigned_faculty_id = (
+                    target_assigned_faculty_id
+                )
+
+                record_student_assignment_history(
+                    db=db,
+                    student=inactive_student,
+                    previous_department_id=(
+                        previous_department_id
+                    ),
+                    new_department_id=target_department_id,
+                    previous_batch_id=previous_batch_id,
+                    new_batch_id=target_batch_id,
+                    previous_year=previous_current_year,
+                    new_year=target_current_year,
+                    previous_faculty_id=(
+                        previous_assigned_faculty_id
+                    ),
+                    new_faculty_id=(
+                        target_assigned_faculty_id
+                    ),
+                    changed_by_faculty_id=(
+                        changed_by_faculty_id
+                    ),
+                    changed_by_admin_id=changed_by_admin_id,
+                    reason=(
+                        "CSV student reactivation academic "
+                        "assignment"
+                    ),
                 )
 
                 inserted += 1
@@ -403,11 +971,32 @@ async def create_students_from_csv(
                 total_points_earned=0,
                 passout_year=passout_year,
                 admitted_year=admitted_year,
+                department_id=target_department_id,
+                batch_id=target_batch_id,
+                current_year=target_current_year,
+                assigned_faculty_id=target_assigned_faculty_id,
                 created_by_faculty_id=row_faculty_id,
                 is_active=True,
             )
 
             db.add(s)
+
+            record_student_assignment_history(
+                db=db,
+                student=s,
+                previous_department_id=None,
+                new_department_id=target_department_id,
+                previous_batch_id=None,
+                new_batch_id=target_batch_id,
+                previous_year=None,
+                new_year=target_current_year,
+                previous_faculty_id=None,
+                new_faculty_id=target_assigned_faculty_id,
+                changed_by_faculty_id=changed_by_faculty_id,
+                changed_by_admin_id=changed_by_admin_id,
+                reason="Initial CSV student academic assignment",
+            )
+
             inserted += 1
 
             active_usns.add((college_key, usn_key))
