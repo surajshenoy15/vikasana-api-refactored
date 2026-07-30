@@ -16,11 +16,42 @@ from app.features.students.schemas.student import (
     StudentOut,
 )
 
+from app.features.faculty.dashboard_service import (
+    get_website_faculty_dashboard_stats as get_scoped_dashboard_stats,
+)
+
+from app.features.faculty.schemas.website_dashboard import (
+    WebsiteFacultyDashboardStatsOut,
+)
+
 
 router = APIRouter(
     prefix="/website/faculty",
     tags=["Website - Faculty"],
 )
+
+
+@router.get(
+    "/dashboard/stats",
+    response_model=WebsiteFacultyDashboardStatsOut,
+    summary="Website Faculty dashboard statistics",
+)
+async def get_website_faculty_dashboard_stats(
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> WebsiteFacultyDashboardStatsOut:
+    """
+    Return read-only dashboard statistics within the authenticated
+    College Coordinator, HOD, or Faculty Coordinator scope.
+
+    Department architecture must be enabled for the Faculty college.
+    """
+    return await get_scoped_dashboard_stats(
+        db=db,
+        scope=scope,
+    )
 
 
 @router.get(
