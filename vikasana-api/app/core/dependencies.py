@@ -11,6 +11,14 @@ from app.features.faculty.models import Faculty
 from app.features.students.models import Student
 from app.features.college_access.service import ensure_college_is_active
 
+from app.features.faculty.role_policy import is_website_management_role
+from app.features.faculty.role_policy import normalize_faculty_role
+
+from app.features.faculty.permission_scope import WebsiteFacultyScope
+from app.features.faculty.permission_scope import resolve_website_faculty_scope
+
+from app.features.organization.service import require_department_architecture_enabled
+
 bearer = HTTPBearer(auto_error=False)
 
 
@@ -114,6 +122,85 @@ async def get_current_faculty(
     await ensure_college_is_active(db, faculty.college)
 
     return faculty
+
+
+async def get_current_website_faculty(
+    current_faculty: Faculty = Depends(
+        get_current_faculty
+    ),
+) -> Faculty:
+    """
+    Require an authenticated Faculty account with a website
+    management role.
+
+    This guard reuses get_current_faculty, so account activation and
+    college SaaS checks remain unchanged. It performs no database
+    write and does not modify the Faculty record.
+    """
+    faculty_role = getattr(
+        current_faculty,
+        "role",
+        None,
+    )
+
+    if not is_website_management_role(faculty_role):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "This faculty account does not have "
+                "website management access"
+            ),
+        )
+
+    # Validate the value without mutating the Faculty ORM object.
+    # Role-specific guards can normalise locally when required.
+    normalize_faculty_role(faculty_role)
+
+    return current_faculty
+
+
+async def get_current_website_faculty_scope(
+    current_faculty: Faculty = Depends(
+        get_current_website_faculty
+    ),
+) -> WebsiteFacultyScope:
+    """
+    Resolve an authenticated website Faculty account into an
+    immutable authorization scope.
+
+    The dependency performs no database write and does not mutate
+    the Faculty ORM object.
+    """
+    try:
+        return resolve_website_faculty_scope(
+            current_faculty
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(error),
+        ) from error
+
+
+async def get_current_enabled_website_faculty_scope(
+    scope: WebsiteFacultyScope = Depends(
+        get_current_website_faculty_scope
+    ),
+    db: AsyncSession = Depends(get_db),
+) -> WebsiteFacultyScope:
+    """
+    Require an authenticated website Faculty scope whose college has
+    department-wise architecture enabled.
+
+    The organization-mode check is read-only. This dependency does
+    not mutate the scope, Faculty account, or organization settings.
+    """
+    await require_department_architecture_enabled(
+        db,
+        scope.college,
+    )
+
+    return scope
 
 
 async def get_current_student(

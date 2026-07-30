@@ -171,11 +171,13 @@ app.include_router(
 # ── Faculty ──
 
 from app.features.faculty.routes import router as faculty_router
+from app.features.faculty.website_routes import router as website_faculty_router
 
 app.include_router(
     faculty_router,
     prefix="/api",
 )
+app.include_router(website_faculty_router, prefix="/api")
 
 
 # ── Students ──
