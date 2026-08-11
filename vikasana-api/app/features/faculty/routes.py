@@ -11,6 +11,7 @@ from app.core.dependencies import get_current_admin, get_current_faculty
 from app.features.auth.models import Admin
 from app.features.faculty.models import Faculty, FacultyActivationSession
 from app.features.students.models import Student
+from app.features.organization.models import College, CollegeAlias
 
 from app.features.activities.models import ActivitySession, ActivitySessionStatus
 
@@ -42,6 +43,8 @@ from app.features.faculty.service import (
     activate_faculty,
     update_faculty,
 )
+
+from app.features.faculty.role_policy import normalize_faculty_role
 
 from pydantic import BaseModel
 
@@ -196,12 +199,99 @@ async def import_faculty_csv(
 
 @router.get("", response_model=list[FacultyResponse], summary="List faculty (Admin only)")
 async def list_faculty(
+    college_id: int | None = Query(
+        None,
+        ge=1,
+        description="Optional canonical college ID. Includes active aliases.",
+    ),
+    role: str | None = Query(
+        None,
+        description="Optional faculty role filter.",
+    ),
     db: AsyncSession = Depends(get_db),
     admin: Admin = Depends(get_current_admin),
 ):
-    q = await db.execute(select(Faculty).order_by(Faculty.created_at.desc()))
-    items = q.scalars().all()
-    return [FacultyResponse.model_validate(x) for x in items]
+    stmt = select(Faculty)
+
+    # ---------------------------------------------------------
+    # Canonical college scope.
+    #
+    # When college_id is supplied, match the canonical college
+    # name plus all active historical aliases.
+    #
+    # Existing Faculty.college values remain untouched.
+    # ---------------------------------------------------------
+
+    if college_id is not None:
+        college_result = await db.execute(
+            select(College).where(
+                College.id == college_id
+            )
+        )
+
+        canonical_college = (
+            college_result.scalar_one_or_none()
+        )
+
+        if canonical_college is None:
+            raise HTTPException(
+                status_code=404,
+                detail="College not found",
+            )
+
+        alias_result = await db.execute(
+            select(CollegeAlias.alias).where(
+                CollegeAlias.college_id == college_id,
+                CollegeAlias.is_active.is_(True),
+            )
+        )
+
+        aliases = alias_result.scalars().all()
+
+        accepted_names = [
+            canonical_college.name,
+            *aliases,
+        ]
+
+        normalized_names = [
+            name.strip().lower()
+            for name in accepted_names
+            if name and name.strip()
+        ]
+
+        stmt = stmt.where(
+            func.lower(
+                func.trim(Faculty.college)
+            ).in_(normalized_names)
+        )
+
+    # ---------------------------------------------------------
+    # Optional canonical role filter.
+    # ---------------------------------------------------------
+
+    if role is not None and role.strip():
+        normalized_role = normalize_faculty_role(
+            role
+        )
+
+        stmt = stmt.where(
+            func.lower(
+                func.trim(Faculty.role)
+            ) == normalized_role
+        )
+
+    stmt = stmt.order_by(
+        Faculty.created_at.desc()
+    )
+
+    result = await db.execute(stmt)
+
+    items = result.scalars().all()
+
+    return [
+        FacultyResponse.model_validate(item)
+        for item in items
+    ]
 
 
 @router.patch(
