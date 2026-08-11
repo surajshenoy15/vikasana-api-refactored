@@ -45,6 +45,8 @@ from app.features.students.schemas.student import (
     StudentPointAdjustmentWriteResponse,
 )
 
+from app.features.organization.models import College, CollegeAlias
+
 from app.features.organization.service import require_department_architecture_enabled
 from app.features.students.schemas.assignment import StudentAssignmentUpdateRequest
 from app.features.students.service import apply_student_assignment_update
@@ -371,7 +373,12 @@ async def add_students_bulk_admin(
 @admin_router.get("", response_model=list[StudentOut])
 async def list_students_admin(
     q: str | None = Query(None, description="Optional search. Matches name/usn/branch/email."),
-    college: str | None = Query(None, description="Optional filter by college (exact match)."),
+    college: str | None = Query(None, description="Optional legacy filter by college (exact match)."),
+    college_id: int | None = Query(
+        None,
+        ge=1,
+        description="Optional canonical college ID. Includes active aliases.",
+    ),
     student_type: str | None = Query(None, description="Optional filter: REGULAR or DIPLOMA"),
     branch: str | None = Query(None, description="Optional filter by branch (exact match)."),
     passout_year: int | None = Query(None, description="Optional filter by passout year."),
@@ -418,8 +425,62 @@ async def list_students_admin(
     if is_active is not None:
         stmt = stmt.where(Student.is_active == is_active)
 
-    if college and college.strip():
-        stmt = stmt.where(Student.college == college.strip())
+    # Canonical college scope for Admin drill-down.
+    #
+    # When college_id is supplied, include the canonical college
+    # name plus all active historical aliases. Existing Student.college
+    # values remain untouched.
+    if college_id is not None:
+        college_result = await db.execute(
+            select(College).where(
+                College.id == college_id
+            )
+        )
+
+        canonical_college = (
+            college_result.scalar_one_or_none()
+        )
+
+        if canonical_college is None:
+            raise HTTPException(
+                status_code=404,
+                detail="College not found",
+            )
+
+        alias_result = await db.execute(
+            select(CollegeAlias.alias).where(
+                CollegeAlias.college_id == college_id,
+                CollegeAlias.is_active.is_(True),
+            )
+        )
+
+        aliases = alias_result.scalars().all()
+
+        college_scope_names = [
+            canonical_college.name,
+            *aliases,
+        ]
+
+        normalized_scope_names = list(
+            {
+                str(name).strip().lower()
+                for name in college_scope_names
+                if name and str(name).strip()
+            }
+        )
+
+        stmt = stmt.where(
+            func.lower(
+                func.trim(Student.college)
+            ).in_(normalized_scope_names)
+        )
+
+    elif college and college.strip():
+        # Preserve the existing legacy exact-college behaviour
+        # for callers that still use ?college=...
+        stmt = stmt.where(
+            Student.college == college.strip()
+        )
 
     if q and q.strip():
         like = f"%{q.strip()}%"
