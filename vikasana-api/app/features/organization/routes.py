@@ -17,6 +17,7 @@ from app.features.organization.schemas import (
     AcademicBatchResponse,
     AcademicBatchUpdateRequest,
     CollegeCreateRequest,
+    CollegeDetailsResponse,
     CollegeResponse,
     CollegeUpdateRequest,
     DepartmentCreateRequest,
@@ -31,6 +32,7 @@ from app.features.organization.service import (
     create_department,
     get_academic_batch,
     get_college,
+    get_college_details,
     get_department,
     get_organization_settings,
     list_academic_batches,
@@ -71,14 +73,14 @@ async def read_colleges(
 
 @admin_router.get(
     "/colleges/{college_id}",
-    response_model=CollegeResponse,
+    response_model=CollegeDetailsResponse,
 )
 async def read_college(
     college_id: int,
     db: AsyncSession = Depends(get_db),
     current_admin: Admin = Depends(get_current_admin),
 ):
-    return await get_college(
+    return await get_college_details(
         db,
         college_id,
     )

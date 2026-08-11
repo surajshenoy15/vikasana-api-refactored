@@ -143,6 +143,14 @@ class CollegeResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class CollegeDetailsResponse(CollegeResponse):
+    student_count: int = 0
+    college_coordinator_count: int = 0
+    hod_count: int = 0
+    faculty_count: int = 0
+
+
+
 # --------------------------------------------------
 # ORGANISATION SETTINGS
 # --------------------------------------------------

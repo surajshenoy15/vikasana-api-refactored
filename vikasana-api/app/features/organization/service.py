@@ -5,9 +5,18 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.features.faculty.models import Faculty
+from app.features.faculty.role_policy import (
+    ROLE_COLLEGE_COORDINATOR,
+    ROLE_FACULTY,
+    ROLE_HOD,
+)
+from app.features.students.models import Student
+
 from app.features.organization.models import (
     AcademicBatch,
     College,
+    CollegeAlias,
     CollegeOrganizationSetting,
     Department,
 )
@@ -16,6 +25,7 @@ from app.features.organization.schemas import (
     AcademicBatchResponse,
     AcademicBatchUpdateRequest,
     CollegeCreateRequest,
+    CollegeDetailsResponse,
     CollegeResponse,
     CollegeUpdateRequest,
     DepartmentCreateRequest,
@@ -121,6 +131,137 @@ async def get_college(
         )
 
     return CollegeResponse.model_validate(college)
+
+
+async def _college_scope_names(
+    db: AsyncSession,
+    college: College,
+) -> list[str]:
+    """
+    Return the canonical college name plus active legacy aliases.
+
+    This is read-only and allows historical records containing an
+    old college spelling to remain untouched while still belonging
+    to the canonical college in management views.
+    """
+    result = await db.execute(
+        select(CollegeAlias.alias).where(
+            CollegeAlias.college_id == college.id,
+            CollegeAlias.is_active.is_(True),
+        )
+    )
+
+    aliases = result.scalars().all()
+
+    names = [
+        college.name,
+        *aliases,
+    ]
+
+    normalized_names: list[str] = []
+    seen: set[str] = set()
+
+    for name in names:
+        normalized = (name or "").strip().lower()
+
+        if not normalized:
+            continue
+
+        if normalized in seen:
+            continue
+
+        seen.add(normalized)
+        normalized_names.append(normalized)
+
+    return normalized_names
+
+
+async def get_college_details(
+    db: AsyncSession,
+    college_id: int,
+) -> CollegeDetailsResponse:
+    college = await _find_college(
+        db,
+        college_id,
+    )
+
+    if college is None:
+        raise HTTPException(
+            status_code=404,
+            detail="College not found",
+        )
+
+    college_names = await _college_scope_names(
+        db,
+        college,
+    )
+
+    student_count = await db.scalar(
+        select(
+            func.count(Student.id)
+        ).where(
+            func.lower(
+                func.trim(Student.college)
+            ).in_(college_names)
+        )
+    )
+
+    college_coordinator_count = await db.scalar(
+        select(
+            func.count(Faculty.id)
+        ).where(
+            func.lower(
+                func.trim(Faculty.college)
+            ).in_(college_names),
+            func.lower(
+                func.trim(Faculty.role)
+            ) == ROLE_COLLEGE_COORDINATOR,
+            Faculty.is_active.is_(True),
+        )
+    )
+
+    hod_count = await db.scalar(
+        select(
+            func.count(Faculty.id)
+        ).where(
+            func.lower(
+                func.trim(Faculty.college)
+            ).in_(college_names),
+            func.lower(
+                func.trim(Faculty.role)
+            ) == ROLE_HOD,
+            Faculty.is_active.is_(True),
+        )
+    )
+
+    faculty_count = await db.scalar(
+        select(
+            func.count(Faculty.id)
+        ).where(
+            func.lower(
+                func.trim(Faculty.college)
+            ).in_(college_names),
+            func.lower(
+                func.trim(Faculty.role)
+            ) == ROLE_FACULTY,
+            Faculty.is_active.is_(True),
+        )
+    )
+
+    base = CollegeResponse.model_validate(
+        college
+    ).model_dump()
+
+    return CollegeDetailsResponse(
+        **base,
+        student_count=int(student_count or 0),
+        college_coordinator_count=int(
+            college_coordinator_count or 0
+        ),
+        hod_count=int(hod_count or 0),
+        faculty_count=int(faculty_count or 0),
+    )
+
 
 
 async def create_college(
