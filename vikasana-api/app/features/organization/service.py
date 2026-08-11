@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.features.organization.models import (
     AcademicBatch,
+    College,
     CollegeOrganizationSetting,
     Department,
 )
@@ -14,6 +15,9 @@ from app.features.organization.schemas import (
     AcademicBatchCreateRequest,
     AcademicBatchResponse,
     AcademicBatchUpdateRequest,
+    CollegeCreateRequest,
+    CollegeResponse,
+    CollegeUpdateRequest,
     DepartmentCreateRequest,
     DepartmentResponse,
     DepartmentUpdateRequest,
@@ -56,6 +60,136 @@ async def _commit_or_raise_conflict(
             status_code=409,
             detail=conflict_message,
         ) from error
+
+
+# --------------------------------------------------
+# COLLEGE MASTER
+# --------------------------------------------------
+
+
+async def _find_college(
+    db: AsyncSession,
+    college_id: int,
+) -> College | None:
+    result = await db.execute(
+        select(College).where(
+            College.id == college_id
+        )
+    )
+
+    return result.scalar_one_or_none()
+
+
+async def list_colleges(
+    db: AsyncSession,
+    include_inactive: bool = False,
+) -> list[CollegeResponse]:
+    statement = select(College)
+
+    if not include_inactive:
+        statement = statement.where(
+            College.is_active.is_(True)
+        )
+
+    statement = statement.order_by(
+        College.name.asc(),
+        College.id.asc(),
+    )
+
+    result = await db.execute(statement)
+    colleges = result.scalars().all()
+
+    return [
+        CollegeResponse.model_validate(college)
+        for college in colleges
+    ]
+
+
+async def get_college(
+    db: AsyncSession,
+    college_id: int,
+) -> CollegeResponse:
+    college = await _find_college(
+        db,
+        college_id,
+    )
+
+    if college is None:
+        raise HTTPException(
+            status_code=404,
+            detail="College not found",
+        )
+
+    return CollegeResponse.model_validate(college)
+
+
+async def create_college(
+    db: AsyncSession,
+    payload: CollegeCreateRequest,
+    *,
+    created_by_admin_id: int | None = None,
+) -> CollegeResponse:
+    normalized_name = normalize_college(payload.name)
+
+    college = College(
+        name=normalized_name,
+        code=payload.code,
+        is_active=payload.is_active,
+        created_by_admin_id=created_by_admin_id,
+    )
+
+    db.add(college)
+
+    await _commit_or_raise_conflict(
+        db,
+        "A college with the same name or code already exists",
+    )
+
+    await db.refresh(college)
+
+    return CollegeResponse.model_validate(college)
+
+
+async def update_college(
+    db: AsyncSession,
+    college_id: int,
+    payload: CollegeUpdateRequest,
+) -> CollegeResponse:
+    college = await _find_college(
+        db,
+        college_id,
+    )
+
+    if college is None:
+        raise HTTPException(
+            status_code=404,
+            detail="College not found",
+        )
+
+    updates = payload.model_dump(
+        exclude_unset=True,
+    )
+
+    if "name" in updates:
+        updates["name"] = normalize_college(
+            updates["name"]
+        )
+
+    for field_name, value in updates.items():
+        setattr(
+            college,
+            field_name,
+            value,
+        )
+
+    await _commit_or_raise_conflict(
+        db,
+        "A college with the same name or code already exists",
+    )
+
+    await db.refresh(college)
+
+    return CollegeResponse.model_validate(college)
 
 
 # --------------------------------------------------

@@ -27,6 +27,158 @@ if TYPE_CHECKING:
 
 
 # --------------------------------------------------
+# COLLEGE MASTER
+# --------------------------------------------------
+
+
+class College(Base):
+    __tablename__ = "colleges"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    code: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+    )
+
+    created_by_admin_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "admins.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    aliases: Mapped[List["CollegeAlias"]] = relationship(
+        "CollegeAlias",
+        back_populates="college",
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_colleges_name",
+            "name",
+        ),
+    )
+
+
+Index(
+    "uq_colleges_name_ci",
+    func.lower(func.trim(College.name)),
+    unique=True,
+)
+
+Index(
+    "uq_colleges_code_ci",
+    func.lower(func.trim(College.code)),
+    unique=True,
+    postgresql_where=text(
+        "code IS NOT NULL AND TRIM(code) <> ''"
+    ),
+)
+
+
+# --------------------------------------------------
+# COLLEGE ALIASES
+# --------------------------------------------------
+
+
+class CollegeAlias(Base):
+    __tablename__ = "college_aliases"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    college_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "colleges.id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+
+    alias: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+    )
+
+    created_by_admin_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "admins.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    college: Mapped["College"] = relationship(
+        "College",
+        back_populates="aliases",
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_college_aliases_college_id",
+            "college_id",
+        ),
+    )
+
+
+Index(
+    "uq_college_aliases_alias_ci",
+    func.lower(func.trim(CollegeAlias.alias)),
+    unique=True,
+)
+
+
+# --------------------------------------------------
 # COLLEGE ORGANISATION SETTINGS
 # --------------------------------------------------
 
@@ -464,6 +616,156 @@ class StudentAcademicHistory(Base):
         Index(
             "ix_student_academic_history_changed_by_faculty",
             "changed_by_faculty_id",
+        ),
+    )
+
+
+# --------------------------------------------------
+# FACULTY ACCESS / ROLE HISTORY
+# --------------------------------------------------
+
+
+class FacultyAccessHistory(Base):
+    __tablename__ = "faculty_access_history"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    faculty_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    action: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+    )
+
+    previous_role: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    new_role: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    previous_parent_faculty_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    new_parent_faculty_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    college: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    department_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "departments.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    changed_by_admin_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "admins.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    changed_by_faculty_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    note: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    faculty: Mapped[Optional["Faculty"]] = relationship(
+        "Faculty",
+        foreign_keys=[faculty_id],
+    )
+
+    previous_parent_faculty: Mapped[Optional["Faculty"]] = relationship(
+        "Faculty",
+        foreign_keys=[previous_parent_faculty_id],
+    )
+
+    new_parent_faculty: Mapped[Optional["Faculty"]] = relationship(
+        "Faculty",
+        foreign_keys=[new_parent_faculty_id],
+    )
+
+    changed_by_faculty: Mapped[Optional["Faculty"]] = relationship(
+        "Faculty",
+        foreign_keys=[changed_by_faculty_id],
+    )
+
+    changed_by_admin: Mapped[Optional["Admin"]] = relationship(
+        "Admin",
+        foreign_keys=[changed_by_admin_id],
+    )
+
+    department: Mapped[Optional["Department"]] = relationship(
+        "Department",
+        foreign_keys=[department_id],
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_faculty_access_history_faculty_created",
+            "faculty_id",
+            "created_at",
+        ),
+        Index(
+            "ix_faculty_access_history_changed_by_faculty",
+            "changed_by_faculty_id",
+        ),
+        Index(
+            "ix_faculty_access_history_changed_by_admin",
+            "changed_by_admin_id",
+        ),
+        Index(
+            "ix_faculty_access_history_parent",
+            "new_parent_faculty_id",
         ),
     )
 

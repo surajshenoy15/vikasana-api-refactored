@@ -25,7 +25,6 @@ WEBSITE_MANAGEMENT_ROLES: frozenset[str] = frozenset(
     {
         ROLE_COLLEGE_COORDINATOR,
         ROLE_HOD,
-        ROLE_FACULTY_COORDINATOR,
     }
 )
 

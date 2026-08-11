@@ -16,6 +16,9 @@ from app.features.organization.schemas import (
     AcademicBatchCreateRequest,
     AcademicBatchResponse,
     AcademicBatchUpdateRequest,
+    CollegeCreateRequest,
+    CollegeResponse,
+    CollegeUpdateRequest,
     DepartmentCreateRequest,
     DepartmentResponse,
     DepartmentUpdateRequest,
@@ -24,13 +27,17 @@ from app.features.organization.schemas import (
 )
 from app.features.organization.service import (
     create_academic_batch,
+    create_college,
     create_department,
     get_academic_batch,
+    get_college,
     get_department,
     get_organization_settings,
     list_academic_batches,
+    list_colleges,
     list_departments,
     update_academic_batch,
+    update_college,
     update_department,
     update_organization_settings,
 )
@@ -40,6 +47,75 @@ admin_router = APIRouter(
     prefix="/admin/organization",
     tags=["Admin - Organization"],
 )
+
+
+# --------------------------------------------------
+# COLLEGE MASTER ROUTES
+# --------------------------------------------------
+
+
+@admin_router.get(
+    "/colleges",
+    response_model=list[CollegeResponse],
+)
+async def read_colleges(
+    include_inactive: bool = Query(default=False),
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    return await list_colleges(
+        db,
+        include_inactive=include_inactive,
+    )
+
+
+@admin_router.get(
+    "/colleges/{college_id}",
+    response_model=CollegeResponse,
+)
+async def read_college(
+    college_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    return await get_college(
+        db,
+        college_id,
+    )
+
+
+@admin_router.post(
+    "/colleges",
+    response_model=CollegeResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def write_college(
+    payload: CollegeCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    return await create_college(
+        db,
+        payload,
+        created_by_admin_id=current_admin.id,
+    )
+
+
+@admin_router.patch(
+    "/colleges/{college_id}",
+    response_model=CollegeResponse,
+)
+async def edit_college(
+    college_id: int,
+    payload: CollegeUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    return await update_college(
+        db,
+        college_id,
+        payload,
+    )
 
 
 # --------------------------------------------------

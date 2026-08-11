@@ -54,6 +54,96 @@ BatchNameStr = Annotated[
 
 
 # --------------------------------------------------
+# COLLEGE MASTER
+# --------------------------------------------------
+
+
+class CollegeCreateRequest(BaseModel):
+    name: CollegeStr
+
+    code: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=50,
+    )
+
+    is_active: bool = True
+
+    @field_validator("code")
+    @classmethod
+    def normalize_college_code(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+
+        normalized = value.strip().upper()
+
+        if not normalized:
+            return None
+
+        return normalized
+
+
+class CollegeUpdateRequest(BaseModel):
+    name: CollegeStr | None = None
+
+    code: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=50,
+    )
+
+    is_active: bool | None = None
+
+    @field_validator("code")
+    @classmethod
+    def normalize_optional_college_code(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+
+        normalized = value.strip().upper()
+
+        if not normalized:
+            return None
+
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_college_update(self) -> Self:
+        if (
+            self.name is None
+            and self.code is None
+            and self.is_active is None
+        ):
+            raise ValueError(
+                "At least one college field must be provided"
+            )
+
+        return self
+
+
+class CollegeResponse(BaseModel):
+    id: int
+
+    name: str
+    code: str | None = None
+
+    is_active: bool
+
+    created_by_admin_id: int | None = None
+
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# --------------------------------------------------
 # ORGANISATION SETTINGS
 # --------------------------------------------------
 

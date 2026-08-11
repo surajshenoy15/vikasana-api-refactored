@@ -81,6 +81,7 @@ async def add_faculty(
         image_bytes=image_bytes,
         image_content_type=image.content_type if image else None,
         image_filename=image.filename if image else None,
+        created_by_admin_id=admin.id,
     )
 
     message = (
@@ -173,6 +174,7 @@ async def import_faculty_csv(
                 image_bytes=None,
                 image_content_type=None,
                 image_filename=None,
+                created_by_admin_id=admin.id,
             )
 
             created_faculty.append(FacultyResponse.model_validate(faculty))
@@ -221,27 +223,57 @@ async def patch_faculty(
     return FacultyResponse.model_validate(faculty)
 
 
-@router.delete("/{faculty_id}", summary="Delete faculty member (Admin only)")
+@router.delete(
+    "/{faculty_id}",
+    summary="Deactivate faculty member (Admin only)",
+)
 async def delete_faculty(
     faculty_id: int,
     db: AsyncSession = Depends(get_db),
     admin: Admin = Depends(get_current_admin),
 ):
-    result = await db.execute(select(Faculty).where(Faculty.id == faculty_id))
-    faculty = result.scalar_one_or_none()
-    if not faculty:
-        raise HTTPException(status_code=404, detail="Faculty not found")
+    """
+    Historical Faculty records must never be physically deleted.
 
-    await db.execute(
-        delete(FacultyActivationSession).where(
-            FacultyActivationSession.faculty_id == faculty_id
+    This legacy DELETE endpoint is intentionally retained for frontend
+    backward compatibility, but its behavior is now non-destructive.
+    """
+
+    result = await db.execute(
+        select(Faculty).where(
+            Faculty.id == faculty_id
         )
     )
 
-    await db.delete(faculty)
-    await db.commit()
+    faculty = result.scalar_one_or_none()
 
-    return {"detail": f"Faculty {faculty_id} deleted"}
+    if not faculty:
+        raise HTTPException(
+            status_code=404,
+            detail="Faculty not found",
+        )
+
+    if not faculty.is_active:
+        return {
+            "detail": f"Faculty {faculty_id} is already inactive",
+            "faculty_id": faculty_id,
+            "is_active": False,
+        }
+
+    faculty.is_active = False
+
+    try:
+        await db.commit()
+        await db.refresh(faculty)
+    except Exception:
+        await db.rollback()
+        raise
+
+    return {
+        "detail": f"Faculty {faculty_id} deactivated",
+        "faculty_id": faculty.id,
+        "is_active": faculty.is_active,
+    }
 
 
 # =========================================================

@@ -52,6 +52,13 @@ class FacultyResponse(BaseModel):
     department_id: int | None = None
     legacy_college_scope: bool = False
 
+    # Current management hierarchy.
+    parent_faculty_id: int | None = None
+
+    # Original account-creation provenance.
+    created_by_admin_id: int | None = None
+    created_by_faculty_id: int | None = None
+
     class Config:
         from_attributes = True
 

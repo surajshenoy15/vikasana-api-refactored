@@ -11,7 +11,10 @@ from fastapi import HTTPException
 from app.features.faculty.models import Faculty
 from app.features.faculty.models import FacultyActivationSession
 from app.features.faculty.schemas.faculty import FacultyCreateRequest, FacultyUpdateRequest
-from app.features.organization.models import Department
+from app.features.organization.models import (
+    Department,
+    FacultyAccessHistory,
+)
 from app.core.file_storage import upload_faculty_image
 from app.core.email_service import send_activation_email, send_faculty_otp_email
 from app.core.faculty_tokens import (
@@ -64,22 +67,133 @@ def constant_time_equals(a: str, b: str) -> bool:
     return hmac.compare_digest(a, b)
 
 
+# --------------------------------------------------
+# FACULTY ACCESS / ROLE AUDIT
+# --------------------------------------------------
+
+
+async def add_faculty_access_history(
+    db: AsyncSession,
+    *,
+    faculty_id: int,
+    action: str,
+    college: str,
+    previous_role: str | None = None,
+    new_role: str | None = None,
+    previous_parent_faculty_id: int | None = None,
+    new_parent_faculty_id: int | None = None,
+    department_id: int | None = None,
+    changed_by_admin_id: int | None = None,
+    changed_by_faculty_id: int | None = None,
+    note: str | None = None,
+) -> FacultyAccessHistory:
+    """
+    Add one immutable Faculty hierarchy/access audit entry.
+
+    This helper deliberately DOES NOT commit.
+    The caller owns the surrounding transaction.
+
+    Exactly one actor must be supplied:
+        changed_by_admin_id
+        OR
+        changed_by_faculty_id
+    """
+
+    admin_actor = changed_by_admin_id is not None
+    faculty_actor = changed_by_faculty_id is not None
+
+    if admin_actor == faculty_actor:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Exactly one access-history actor is required: "
+                "Admin or Faculty"
+            ),
+        )
+
+    normalized_action = (action or "").strip()
+
+    if not normalized_action:
+        raise HTTPException(
+            status_code=400,
+            detail="Access-history action is required",
+        )
+
+    normalized_college = (college or "").strip()
+
+    if not normalized_college:
+        raise HTTPException(
+            status_code=400,
+            detail="Access-history college is required",
+        )
+
+    history = FacultyAccessHistory(
+        faculty_id=faculty_id,
+        action=normalized_action,
+        previous_role=previous_role,
+        new_role=new_role,
+        previous_parent_faculty_id=previous_parent_faculty_id,
+        new_parent_faculty_id=new_parent_faculty_id,
+        college=normalized_college,
+        department_id=department_id,
+        changed_by_admin_id=changed_by_admin_id,
+        changed_by_faculty_id=changed_by_faculty_id,
+        note=note.strip() if note and note.strip() else None,
+    )
+
+    db.add(history)
+
+    # Allocate/validate the row inside the current transaction.
+    # No commit happens here.
+    await db.flush()
+
+    return history
+
+
 # ---------------------------
 # Existing: Create Faculty + Send Activation Email (unchanged behavior)
 # ---------------------------
 
-async def create_faculty(
+async def prepare_faculty_creation(
     payload: FacultyCreateRequest,
     db: AsyncSession,
     image_bytes: bytes | None = None,
     image_content_type: str | None = None,
     image_filename: str | None = None,
-) -> tuple[Faculty, bool]:
-    # check existing
-    q = await db.execute(select(Faculty).where(Faculty.email == payload.email))
+    *,
+    parent_faculty_id: int | None = None,
+    created_by_admin_id: int | None = None,
+    created_by_faculty_id: int | None = None,
+) -> tuple[Faculty, str]:
+    """
+    Prepare a new Faculty account inside the caller's transaction.
+
+    This function deliberately DOES NOT commit and DOES NOT send the
+    activation email.
+
+    It is used by hierarchy flows that must atomically create:
+        Faculty + faculty_access_history
+
+    The returned plaintext activation token must only be used for
+    sending the activation email after the transaction commits.
+    """
+
+    normalized_email = str(payload.email).strip().lower()
+
+    q = await db.execute(
+        select(Faculty).where(
+            func.lower(func.trim(Faculty.email))
+            == normalized_email
+        )
+    )
+
     existing = q.scalar_one_or_none()
+
     if existing:
-        raise HTTPException(status_code=409, detail="Faculty already exists with this email")
+        raise HTTPException(
+            status_code=409,
+            detail="Faculty already exists with this email",
+        )
 
     if payload.department_id is not None:
         normalized_college = payload.college.strip().lower()
@@ -88,9 +202,11 @@ async def create_faculty(
             select(Department).where(
                 Department.id == payload.department_id,
                 Department.is_active.is_(True),
-                func.lower(func.trim(Department.college)) == normalized_college,
+                func.lower(func.trim(Department.college))
+                == normalized_college,
             )
         )
+
         department = department_result.scalar_one_or_none()
 
         if not department:
@@ -103,6 +219,7 @@ async def create_faculty(
             )
 
     image_url = None
+
     if image_bytes and image_filename:
         image_url = await upload_faculty_image(
             file_bytes=image_bytes,
@@ -110,50 +227,122 @@ async def create_faculty(
             filename=image_filename,
         )
 
-    token = create_activation_token(payload.email)
+    token = create_activation_token(normalized_email)
     token_hash = hash_token(token)
-    print("\n================ ACTIVATION TOKEN ================")
-    print(f"EMAIL: {payload.email}")
-    print(f"TOKEN: {token}")
-    print(f"URL : http://31.97.230.171:8000/api/faculty/activation/validate?token={token}")
-    print("==================================================\n")
 
     faculty = Faculty(
-        full_name=payload.full_name,
-        college=payload.college,
-        email=payload.email,
+        full_name=payload.full_name.strip(),
+        college=payload.college.strip(),
+        email=normalized_email,
         role=payload.role,
         department_id=payload.department_id,
+        parent_faculty_id=parent_faculty_id,
+        created_by_admin_id=created_by_admin_id,
+        created_by_faculty_id=created_by_faculty_id,
         is_active=False,
         activation_token_hash=token_hash,
         activation_expires_at=activation_expiry_dt(),
         image_url=image_url,
-        # password_hash / password_set_at remain None initially
     )
 
     db.add(faculty)
-    await db.commit()
+
+    # Allocate the Faculty ID without committing the transaction.
+    await db.flush()
     await db.refresh(faculty)
 
-    # activation URL (frontend page) OR API activation endpoint
-    frontend_base = os.getenv("FRONTEND_BASE_URL", "").rstrip("/")
+    return faculty, token
+
+
+async def send_faculty_activation_email(
+    faculty: Faculty,
+    token: str,
+) -> bool:
+    """
+    Send the activation email after the account transaction succeeds.
+
+    Email failure does not roll back an already committed Faculty
+    account; the caller receives False and can surface that state.
+    """
+
+    frontend_base = os.getenv(
+        "FRONTEND_BASE_URL",
+        "",
+    ).rstrip("/")
 
     if frontend_base:
-        activate_url = f"{frontend_base}/activate?token={token}"
+        activate_url = (
+            f"{frontend_base}/activate?token={token}"
+        )
     else:
-        activate_url = "http://31.97.230.171:8000/api/faculty/activate?token=" + token
+        activate_url = (
+            "http://31.97.230.171:8000"
+            "/api/faculty/activate?token="
+            + token
+        )
 
-    # do not crash if email not configured
-    email_sent = False
     try:
         await send_activation_email(
             to_email=faculty.email,
             to_name=faculty.full_name,
             activate_url=activate_url,
         )
-        email_sent = True
-    except Exception as e:
-        print(f"[WARN] Activation email not sent for {faculty.email}: {e}")
+        return True
+
+    except Exception as error:
+        print(
+            "[WARN] Activation email not sent for "
+            f"{faculty.email}: {error}"
+        )
+        return False
+
+
+async def create_faculty(
+    payload: FacultyCreateRequest,
+    db: AsyncSession,
+    image_bytes: bytes | None = None,
+    image_content_type: str | None = None,
+    image_filename: str | None = None,
+    *,
+    parent_faculty_id: int | None = None,
+    created_by_admin_id: int | None = None,
+    created_by_faculty_id: int | None = None,
+) -> tuple[Faculty, bool]:
+    """
+    Backward-compatible Faculty creation wrapper.
+
+    Existing Admin callers continue to receive:
+        (faculty, activation_email_sent)
+
+    Transaction:
+        prepare Faculty
+        -> commit
+        -> send activation email
+    """
+
+    try:
+        faculty, token = await prepare_faculty_creation(
+            payload=payload,
+            db=db,
+            image_bytes=image_bytes,
+            image_content_type=image_content_type,
+            image_filename=image_filename,
+            parent_faculty_id=parent_faculty_id,
+            created_by_admin_id=created_by_admin_id,
+            created_by_faculty_id=created_by_faculty_id,
+        )
+
+        await db.commit()
+        await db.refresh(faculty)
+
+    except Exception:
+        await db.rollback()
+        raise
+
+    email_sent = await send_faculty_activation_email(
+        faculty,
+        token,
+    )
 
     return faculty, email_sent
 

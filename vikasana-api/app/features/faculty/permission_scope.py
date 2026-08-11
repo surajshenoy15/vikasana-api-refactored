@@ -101,10 +101,7 @@ def resolve_website_faculty_scope(
             department_id=None,
         )
 
-    if role in {
-        ROLE_HOD,
-        ROLE_FACULTY_COORDINATOR,
-    }:
+    if role == ROLE_HOD:
         if (
             not isinstance(department_id, int)
             or isinstance(department_id, bool)

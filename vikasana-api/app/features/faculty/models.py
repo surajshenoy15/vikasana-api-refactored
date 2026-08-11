@@ -71,6 +71,41 @@ class Faculty(Base):
         default=False,
         server_default=text("false"),
     )
+
+    # Current parent in the management hierarchy.
+    #
+    # College Coordinator -> NULL
+    # HOD                 -> College Coordinator
+    # Faculty / Mentor    -> HOD
+    parent_faculty_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    # Records whether the account was originally created by an Admin.
+    created_by_admin_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "admins.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    # Records whether the account was originally created by another
+    # Faculty management account such as College Coordinator or HOD.
+    created_by_faculty_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
     department: Mapped["Department | None"] = relationship(
         "Department",
         back_populates="faculty_members",
