@@ -1,5 +1,32 @@
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
+from app.features.organization.schemas import (
+    DepartmentCodeStr,
+    DepartmentNameStr,
+)
+
+
+class WebsiteDepartmentCreateRequest(BaseModel):
+    """
+    Request used by a College Coordinator to create
+    a department.
+
+    College and creator provenance are derived from
+    the authenticated College Coordinator and are
+    never accepted from the client.
+    """
+
+    name: DepartmentNameStr
+    code: DepartmentCodeStr
+
+    @field_validator("code")
+    @classmethod
+    def normalize_code(
+        cls,
+        value: str,
+    ) -> str:
+        return value.upper()
+
 
 class WebsiteHODCreateRequest(BaseModel):
     """
