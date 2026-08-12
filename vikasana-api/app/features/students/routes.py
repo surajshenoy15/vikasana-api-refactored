@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, func, cast, String, delete
+from sqlalchemy import select, or_, and_, func, cast, String, delete
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
@@ -511,8 +511,22 @@ async def list_students_admin(
         stmt = stmt.where(Student.admitted_year == admitted_year)
 
     if assigned_faculty_id is not None:
+        # Department hierarchy compatibility:
+        #
+        # New records use assigned_faculty_id explicitly.
+        # Legacy records may only have created_by_faculty_id,
+        # which historically represented the faculty/mentor.
+        #
+        # Never let the legacy creator override an explicit
+        # hierarchy assignment.
         stmt = stmt.where(
-            Student.assigned_faculty_id == assigned_faculty_id
+            or_(
+                Student.assigned_faculty_id == assigned_faculty_id,
+                and_(
+                    Student.assigned_faculty_id.is_(None),
+                    Student.created_by_faculty_id == assigned_faculty_id,
+                ),
+            )
         )
 
     stmt = stmt.order_by(Student.id.desc())
