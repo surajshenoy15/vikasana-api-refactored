@@ -206,6 +206,9 @@ async def get_college_details(
         )
     )
 
+    # Organization hierarchy counts include both active and
+    # pending/inactive accounts. Activation state is account status,
+    # not whether the hierarchy relationship exists.
     college_coordinator_count = await db.scalar(
         select(
             func.count(Faculty.id)
@@ -216,7 +219,6 @@ async def get_college_details(
             func.lower(
                 func.trim(Faculty.role)
             ) == ROLE_COLLEGE_COORDINATOR,
-            Faculty.is_active.is_(True),
         )
     )
 
@@ -230,7 +232,6 @@ async def get_college_details(
             func.lower(
                 func.trim(Faculty.role)
             ) == ROLE_HOD,
-            Faculty.is_active.is_(True),
         )
     )
 
@@ -244,7 +245,6 @@ async def get_college_details(
             func.lower(
                 func.trim(Faculty.role)
             ) == ROLE_FACULTY,
-            Faculty.is_active.is_(True),
         )
     )
 

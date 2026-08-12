@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -8,6 +9,7 @@ from app.core.dependencies import (
 from app.features.faculty.permission_scope import (
     WebsiteFacultyScope,
 )
+from app.features.faculty.models import Faculty
 from app.features.faculty.role_policy import (
     ROLE_COLLEGE_COORDINATOR,
     ROLE_FACULTY,
@@ -133,6 +135,52 @@ async def create_website_department(
     )
 
 
+@router.get(
+    "/hods",
+    response_model=list[FacultyResponse],
+    summary="List HODs under College Coordinator",
+)
+async def list_website_hods(
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> list[FacultyResponse]:
+    """
+    List HOD accounts directly under the authenticated
+    College Coordinator.
+
+    The hierarchy is enforced using parent_faculty_id.
+    This endpoint is read-only.
+    """
+
+    if scope.role != ROLE_COLLEGE_COORDINATOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only a College Coordinator can list "
+                "college HOD accounts"
+            ),
+        )
+
+    result = await db.execute(
+        select(Faculty)
+        .where(
+            Faculty.college == scope.college,
+            Faculty.role == ROLE_HOD,
+            Faculty.parent_faculty_id == scope.faculty_id,
+        )
+        .order_by(Faculty.created_at.desc())
+    )
+
+    items = result.scalars().all()
+
+    return [
+        FacultyResponse.model_validate(item)
+        for item in items
+    ]
+
+
 @router.post(
     "/hods",
     response_model=FacultyCreateResponse,
@@ -200,6 +248,59 @@ async def create_website_hod(
         activation_email_sent=email_sent,
         message=message,
     )
+
+
+@router.get(
+    "/mentors",
+    response_model=list[FacultyResponse],
+    summary="List Faculty/Mentors under HOD",
+)
+async def list_website_faculty_mentors(
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> list[FacultyResponse]:
+    """
+    List Faculty/Mentor accounts directly under the
+    authenticated HOD.
+
+    College, department and parent hierarchy are enforced
+    from the authenticated scope. This endpoint is read-only.
+    """
+
+    if scope.role != ROLE_HOD:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only an HOD can list "
+                "Faculty/Mentor accounts"
+            ),
+        )
+
+    if scope.department_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="HOD department is not assigned",
+        )
+
+    result = await db.execute(
+        select(Faculty)
+        .where(
+            Faculty.college == scope.college,
+            Faculty.department_id == scope.department_id,
+            Faculty.role == ROLE_FACULTY,
+            Faculty.parent_faculty_id == scope.faculty_id,
+        )
+        .order_by(Faculty.created_at.desc())
+    )
+
+    items = result.scalars().all()
+
+    return [
+        FacultyResponse.model_validate(item)
+        for item in items
+    ]
 
 
 @router.post(

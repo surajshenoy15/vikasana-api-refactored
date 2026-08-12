@@ -383,6 +383,11 @@ async def list_students_admin(
     branch: str | None = Query(None, description="Optional filter by branch (exact match)."),
     passout_year: int | None = Query(None, description="Optional filter by passout year."),
     admitted_year: int | None = Query(None, description="Optional filter by admitted year."),
+    assigned_faculty_id: int | None = Query(
+        None,
+        ge=1,
+        description="Optional filter by assigned Faculty/Mentor ID.",
+    ),
 
     # ✅ NEW: active / inactive filter
     is_active: bool | None = Query(True, description="Optional filter: true=active, false=inactive"),
@@ -504,6 +509,11 @@ async def list_students_admin(
 
     if admitted_year is not None:
         stmt = stmt.where(Student.admitted_year == admitted_year)
+
+    if assigned_faculty_id is not None:
+        stmt = stmt.where(
+            Student.assigned_faculty_id == assigned_faculty_id
+        )
 
     stmt = stmt.order_by(Student.id.desc())
 

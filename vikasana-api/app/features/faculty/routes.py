@@ -208,6 +208,11 @@ async def list_faculty(
         None,
         description="Optional faculty role filter.",
     ),
+    parent_faculty_id: int | None = Query(
+        None,
+        ge=1,
+        description="Optional parent faculty/HOD ID filter.",
+    ),
     db: AsyncSession = Depends(get_db),
     admin: Admin = Depends(get_current_admin),
 ):
@@ -278,6 +283,11 @@ async def list_faculty(
             func.lower(
                 func.trim(Faculty.role)
             ) == normalized_role
+        )
+
+    if parent_faculty_id is not None:
+        stmt = stmt.where(
+            Faculty.parent_faculty_id == parent_faculty_id
         )
 
     stmt = stmt.order_by(
