@@ -10,6 +10,7 @@ from app.features.faculty.permission_scope import (
 )
 from app.features.faculty.role_policy import (
     ROLE_COLLEGE_COORDINATOR,
+    ROLE_FACULTY,
     ROLE_HOD,
 )
 from app.features.faculty.schemas.faculty import (
@@ -19,6 +20,7 @@ from app.features.faculty.schemas.faculty import (
 )
 from app.features.faculty.schemas.website_hierarchy import (
     WebsiteDepartmentCreateRequest,
+    WebsiteFacultyMentorCreateRequest,
     WebsiteHODCreateRequest,
 )
 from app.features.faculty.service import (
@@ -188,6 +190,74 @@ async def create_website_hod(
         else (
             "HOD created, but activation email "
             "could not be sent."
+        )
+    )
+
+    return FacultyCreateResponse(
+        faculty=FacultyResponse.model_validate(
+            faculty
+        ),
+        activation_email_sent=email_sent,
+        message=message,
+    )
+
+
+@router.post(
+    "/mentors",
+    response_model=FacultyCreateResponse,
+    summary="Create Faculty/Mentor under HOD",
+)
+async def create_website_faculty_mentor(
+    payload: WebsiteFacultyMentorCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> FacultyCreateResponse:
+    """
+    Create a Faculty/Mentor account under the
+    authenticated HOD.
+
+    College, department, role, parent and creator
+    provenance are derived entirely from the HOD scope.
+    """
+
+    if scope.role != ROLE_HOD:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only an HOD can create "
+                "Faculty/Mentor accounts"
+            ),
+        )
+
+    if scope.department_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="HOD department is not assigned",
+        )
+
+    create_payload = FacultyCreateRequest(
+        full_name=payload.full_name,
+        college=scope.college,
+        email=payload.email,
+        role=ROLE_FACULTY,
+        department_id=scope.department_id,
+    )
+
+    faculty, email_sent = await create_faculty(
+        payload=create_payload,
+        db=db,
+        parent_faculty_id=scope.faculty_id,
+        created_by_faculty_id=scope.faculty_id,
+    )
+
+    message = (
+        "Faculty/Mentor created and activation email sent."
+        if email_sent
+        else (
+            "Faculty/Mentor created, but activation "
+            "email could not be sent."
         )
     )
 
