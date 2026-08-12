@@ -12,6 +12,8 @@ from app.features.faculty.models import Faculty
 from app.features.faculty.models import FacultyActivationSession
 from app.features.faculty.schemas.faculty import FacultyCreateRequest, FacultyUpdateRequest
 from app.features.organization.models import (
+    College,
+    CollegeAlias,
     Department,
     FacultyAccessHistory,
 )
@@ -195,6 +197,92 @@ async def prepare_faculty_creation(
             detail="Faculty already exists with this email",
         )
 
+    # ---------------------------------------------------------
+    # College Coordinator uniqueness guard.
+    #
+    # Only one Faculty record may currently hold the
+    # college_coordinator role for a canonical college.
+    #
+    # Canonical college name + active aliases are treated as
+    # the same college. Historical Faculty.college values are
+    # never rewritten or deleted.
+    # ---------------------------------------------------------
+    if payload.role == "college_coordinator":
+        normalized_college = payload.college.strip().lower()
+
+        canonical_result = await db.execute(
+            select(College).where(
+                func.lower(func.trim(College.name))
+                == normalized_college
+            )
+        )
+
+        canonical_college = canonical_result.scalar_one_or_none()
+
+        if canonical_college is None:
+            alias_college_result = await db.execute(
+                select(College)
+                .join(
+                    CollegeAlias,
+                    CollegeAlias.college_id == College.id,
+                )
+                .where(
+                    CollegeAlias.is_active.is_(True),
+                    func.lower(func.trim(CollegeAlias.alias))
+                    == normalized_college,
+                )
+            )
+
+            canonical_college = (
+                alias_college_result.scalars().first()
+            )
+
+        if canonical_college is not None:
+            alias_result = await db.execute(
+                select(CollegeAlias.alias).where(
+                    CollegeAlias.college_id == canonical_college.id,
+                    CollegeAlias.is_active.is_(True),
+                )
+            )
+
+            accepted_names = [
+                canonical_college.name,
+                *alias_result.scalars().all(),
+            ]
+
+            normalized_names = [
+                name.strip().lower()
+                for name in accepted_names
+                if name and name.strip()
+            ]
+        else:
+            normalized_names = [
+                normalized_college
+            ]
+
+        coordinator_result = await db.execute(
+            select(Faculty).where(
+                func.lower(func.trim(Faculty.college)).in_(
+                    normalized_names
+                ),
+                func.lower(func.trim(Faculty.role))
+                == "college_coordinator",
+            )
+        )
+
+        existing_coordinator = (
+            coordinator_result.scalars().first()
+        )
+
+        if existing_coordinator is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "A College Coordinator is already assigned "
+                    "to this college"
+                ),
+            )
+
     if payload.department_id is not None:
         normalized_college = payload.college.strip().lower()
 
@@ -330,6 +418,21 @@ async def create_faculty(
             parent_faculty_id=parent_faculty_id,
             created_by_admin_id=created_by_admin_id,
             created_by_faculty_id=created_by_faculty_id,
+        )
+
+        await add_faculty_access_history(
+            db=db,
+            faculty_id=faculty.id,
+            action="created",
+            college=faculty.college,
+            previous_role=None,
+            new_role=faculty.role,
+            previous_parent_faculty_id=None,
+            new_parent_faculty_id=faculty.parent_faculty_id,
+            department_id=faculty.department_id,
+            changed_by_admin_id=created_by_admin_id,
+            changed_by_faculty_id=created_by_faculty_id,
+            note="Faculty account created",
         )
 
         await db.commit()
