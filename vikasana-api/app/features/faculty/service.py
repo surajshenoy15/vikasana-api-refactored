@@ -386,6 +386,75 @@ async def send_faculty_activation_email(
         return False
 
 
+async def resend_faculty_activation(
+    faculty_id: int,
+    db: AsyncSession,
+) -> tuple[Faculty, bool]:
+    """
+    Regenerate an activation invitation for an existing pending account.
+
+    Safety:
+    - Never overwrites an existing password.
+    - Invalidates all previous OTP activation sessions.
+    - Preserves hierarchy, role, provenance, and historical data.
+    """
+
+    result = await db.execute(
+        select(Faculty).where(
+            Faculty.id == faculty_id
+        )
+    )
+    faculty = result.scalar_one_or_none()
+
+    if not faculty:
+        raise HTTPException(
+            status_code=404,
+            detail="Faculty account not found",
+        )
+
+    # Accounts that already have a password are not pending invitations.
+    # This also prevents a soft-deactivated account from being reactivated
+    # through the invitation flow.
+    if faculty.password_hash:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Account already has a password. "
+                "Activation invitation cannot be resent."
+            ),
+        )
+
+    # Invalidate every older OTP/session for this account before issuing
+    # a new invitation.
+    session_result = await db.execute(
+        select(FacultyActivationSession).where(
+            FacultyActivationSession.faculty_id == faculty.id
+        )
+    )
+
+    for session in session_result.scalars().all():
+        await db.delete(session)
+
+    token = create_activation_token(faculty.email)
+
+    faculty.activation_token_hash = hash_token(token)
+    faculty.activation_expires_at = activation_expiry_dt()
+
+    try:
+        await db.commit()
+        await db.refresh(faculty)
+    except Exception:
+        await db.rollback()
+        raise
+
+    activation_email_sent = await send_faculty_activation_email(
+        faculty,
+        token,
+    )
+
+    return faculty, activation_email_sent
+
+
 async def create_faculty(
     payload: FacultyCreateRequest,
     db: AsyncSession,

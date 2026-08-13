@@ -46,6 +46,7 @@ from app.features.faculty.service import (
     set_password_after_otp,
     activate_faculty,
     update_faculty,
+    resend_faculty_activation,
 )
 
 from app.features.faculty.role_policy import (
@@ -768,6 +769,34 @@ async def list_faculty(
         FacultyResponse.model_validate(item)
         for item in items
     ]
+
+
+@router.post(
+    "/{faculty_id}/resend-activation",
+    summary="Resend account activation invitation (Admin only)",
+)
+async def resend_activation_invitation(
+    faculty_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(get_current_admin),
+):
+    faculty, activation_email_sent = await resend_faculty_activation(
+        faculty_id=faculty_id,
+        db=db,
+    )
+
+    return {
+        "detail": (
+            "Activation invitation resent successfully"
+            if activation_email_sent
+            else "Activation invitation regenerated, but email delivery failed"
+        ),
+        "faculty_id": faculty.id,
+        "email": faculty.email,
+        "role": faculty.role,
+        "activation_email_sent": activation_email_sent,
+        "activation_expires_at": faculty.activation_expires_at,
+    }
 
 
 @router.patch(
