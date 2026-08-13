@@ -253,9 +253,42 @@ def _otp_digits(otp: str) -> str:
 #  1. Faculty — Activation / Invite Email
 # ══════════════════════════════════════════════════════════════
 
-async def send_activation_email(to_email: str, to_name: str, activate_url: str) -> None:
+def _faculty_role_label(role: str | None) -> str:
+    """
+    Convert the stored Faculty.role value into a user-facing account
+    label for activation emails.
+
+    Authentication still uses the generic Faculty account model; this
+    helper changes display wording only.
+    """
+    normalized = (role or "faculty").strip().casefold()
+    normalized = normalized.replace("-", "_").replace(" ", "_")
+
+    labels = {
+        "college_coordinator": "College Coordinator",
+        "hod": "HOD",
+        "head_of_department": "HOD",
+        "faculty_coordinator": "Faculty Coordinator",
+        "faculty": "Faculty/Mentor",
+    }
+
+    return labels.get(normalized, "Faculty/Mentor")
+
+
+async def send_activation_email(
+    to_email: str,
+    to_name: str,
+    activate_url: str,
+    role: str = "faculty",
+) -> None:
     api_key, from_email, from_name = _brevo_cfg()
-    subject = "Invitation — Activate Your Faculty Account | LoRaa Connect"
+
+    role_label = _faculty_role_label(role)
+
+    subject = (
+        f"Invitation — Activate Your {role_label} Account | "
+        "LoRaa Connect"
+    )
 
     body = f"""
           <!-- Greeting section -->
@@ -263,7 +296,7 @@ async def send_activation_email(to_email: str, to_name: str, activate_url: str) 
             <td style="padding:40px 40px 0;">
               <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#2E6BE6;
                         text-transform:uppercase;letter-spacing:1.5px;">
-                Faculty Invitation
+                {role_label} Invitation
               </p>
               <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#0A2463;
                          line-height:1.3;letter-spacing:-.3px;">
@@ -286,7 +319,7 @@ async def send_activation_email(to_email: str, to_name: str, activate_url: str) 
                 You have been invited to join
                 <strong style="color:#0A2463;">LoRaa Connect</strong>,
                 the Social Activity Tracking platform powered by Vikasana Foundation,
-                as a Faculty Member. Please activate your account using the button below.
+                as a {role_label}. Please activate your account using the button below.
               </p>
             </td>
           </tr>
@@ -305,7 +338,7 @@ async def send_activation_email(to_email: str, to_name: str, activate_url: str) 
                       {to_email}
                     </p>
                     <p style="margin:4px 0 0;font-size:13px;color:#64748B;">
-                      Role:&nbsp;<span style="color:#2E6BE6;font-weight:600;">Faculty Member</span>
+                      Role:&nbsp;<span style="color:#2E6BE6;font-weight:600;">{role_label}</span>
                     </p>
                   </td>
                 </tr>
@@ -378,9 +411,17 @@ async def send_activation_email(to_email: str, to_name: str, activate_url: str) 
 #  2. Faculty — OTP Email
 # ══════════════════════════════════════════════════════════════
 
-async def send_faculty_otp_email(to_email: str, to_name: str, otp: str) -> None:
+async def send_faculty_otp_email(
+    to_email: str,
+    to_name: str,
+    otp: str,
+    role: str = "faculty",
+) -> None:
     api_key, from_email, from_name = _brevo_cfg()
-    subject = "Your Verification Code — LoRaa Connect"
+
+    role_label = _faculty_role_label(role)
+
+    subject = f"Your {role_label} Verification Code — LoRaa Connect"
 
     body = f"""
           <!-- Greeting -->
@@ -407,7 +448,7 @@ async def send_faculty_otp_email(to_email: str, to_name: str, otp: str) -> None:
               <p style="margin:0;font-size:15px;color:#475569;line-height:1.75;">
                 Hello <strong style="color:#0A2463;">{to_name}</strong>,
                 please use the verification code below to complete your
-                faculty account activation.
+                {role_label} account activation.
               </p>
             </td>
           </tr>

@@ -374,6 +374,7 @@ async def send_faculty_activation_email(
             to_email=faculty.email,
             to_name=faculty.full_name,
             activate_url=activate_url,
+            role=faculty.role,
         )
         return True
 
@@ -674,6 +675,7 @@ async def send_activation_otp(
         to_email=faculty.email,
         to_name=faculty.full_name,
         otp=otp,
+        role=faculty.role,
     )
 
 
