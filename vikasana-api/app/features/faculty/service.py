@@ -4,7 +4,7 @@ import hashlib
 import hmac
 from datetime import datetime, timezone, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
@@ -267,6 +267,10 @@ async def prepare_faculty_creation(
                 ),
                 func.lower(func.trim(Faculty.role))
                 == "college_coordinator",
+                (
+                    Faculty.is_active.is_(True)
+                    | Faculty.activation_token_hash.is_not(None)
+                ),
             )
         )
 
@@ -455,6 +459,285 @@ async def resend_faculty_activation(
     return faculty, activation_email_sent
 
 
+async def _faculty_college_scope_keys(
+    db: AsyncSession,
+    college_name: str,
+) -> set[str]:
+    """
+    Resolve canonical college + active aliases into normalized keys.
+    """
+
+    normalized_college = (
+        college_name.strip().casefold()
+    )
+
+    canonical_result = await db.execute(
+        select(College).where(
+            func.lower(func.trim(College.name))
+            == normalized_college
+        )
+    )
+
+    canonical_college = (
+        canonical_result.scalar_one_or_none()
+    )
+
+    if canonical_college is None:
+        alias_result = await db.execute(
+            select(College)
+            .join(
+                CollegeAlias,
+                CollegeAlias.college_id == College.id,
+            )
+            .where(
+                CollegeAlias.is_active.is_(True),
+                func.lower(func.trim(CollegeAlias.alias))
+                == normalized_college,
+            )
+        )
+
+        canonical_college = (
+            alias_result.scalars().first()
+        )
+
+    if canonical_college is None:
+        return {
+            normalized_college,
+        }
+
+    alias_result = await db.execute(
+        select(CollegeAlias.alias).where(
+            CollegeAlias.college_id
+            == canonical_college.id,
+            CollegeAlias.is_active.is_(True),
+        )
+    )
+
+    names = [
+        canonical_college.name,
+        *alias_result.scalars().all(),
+    ]
+
+    return {
+        name.strip().casefold()
+        for name in names
+        if name and name.strip()
+    }
+
+
+async def reuse_inactive_college_coordinator(
+    payload: FacultyCreateRequest,
+    db: AsyncSession,
+    image_bytes: bytes | None = None,
+    image_content_type: str | None = None,
+    image_filename: str | None = None,
+    *,
+    created_by_admin_id: int | None = None,
+) -> tuple[Faculty, bool] | None:
+    """
+    Reuse an existing historical College Coordinator row when Admin
+    assigns the same account again.
+
+    This preserves the Faculty ID, hierarchy provenance, password
+    history, and immutable access-history records.
+
+    Returns None when normal Faculty creation should continue.
+    """
+
+    if (
+        payload.role != "college_coordinator"
+        or created_by_admin_id is None
+    ):
+        return None
+
+    normalized_email = (
+        str(payload.email)
+        .strip()
+        .casefold()
+    )
+
+    existing_result = await db.execute(
+        select(Faculty).where(
+            func.lower(func.trim(Faculty.email))
+            == normalized_email
+        )
+    )
+
+    existing = (
+        existing_result.scalar_one_or_none()
+    )
+
+    if existing is None:
+        return None
+
+    existing_role = (
+        str(existing.role or "")
+        .strip()
+        .casefold()
+    )
+
+    # Same email belonging to another role remains a hard duplicate.
+    if existing_role != "college_coordinator":
+        return None
+
+    # Only a genuinely removed historical Coordinator may be reused.
+    #
+    # Pending-activation accounts are still current assignments even
+    # though is_active=False, because they retain an activation token.
+    if (
+        existing.is_active
+        or existing.activation_token_hash is not None
+    ):
+        return None
+
+    requested_scope = await _faculty_college_scope_keys(
+        db,
+        payload.college,
+    )
+
+    existing_college_key = (
+        str(existing.college or "")
+        .strip()
+        .casefold()
+    )
+
+    # Never reuse an account across colleges.
+    if existing_college_key not in requested_scope:
+        return None
+
+    # Make sure there is no OTHER current Coordinator for this college.
+    other_result = await db.execute(
+        select(Faculty).where(
+            Faculty.id != existing.id,
+            func.lower(func.trim(Faculty.college)).in_(
+                list(requested_scope)
+            ),
+            func.lower(func.trim(Faculty.role))
+            == "college_coordinator",
+            (
+                Faculty.is_active.is_(True)
+                | Faculty.activation_token_hash.is_not(None)
+            ),
+        )
+    )
+
+    other_coordinator = (
+        other_result.scalars().first()
+    )
+
+    if other_coordinator is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A College Coordinator is already assigned "
+                "to this college"
+            ),
+        )
+
+    previous_role = existing.role
+    previous_parent_faculty_id = (
+        existing.parent_faculty_id
+    )
+
+    existing.full_name = (
+        payload.full_name.strip()
+    )
+
+    # Coordinator hierarchy is always college-level.
+    existing.role = "college_coordinator"
+    existing.department_id = None
+    existing.parent_faculty_id = None
+
+    if image_bytes and image_filename:
+        existing.image_url = await upload_faculty_image(
+            file_bytes=image_bytes,
+            content_type=(
+                image_content_type
+                or "image/jpeg"
+            ),
+            filename=image_filename,
+        )
+
+    # Any previous OTP/set-password sessions must become invalid.
+    await db.execute(
+        delete(FacultyActivationSession).where(
+            FacultyActivationSession.faculty_id
+            == existing.id
+        )
+    )
+
+    token = None
+
+    if existing.password_hash:
+        # Previously activated account:
+        # restore access without resetting its password.
+        existing.is_active = True
+        existing.activation_token_hash = None
+        existing.activation_expires_at = None
+
+        history_action = "reactivated"
+        history_note = (
+            "Existing College Coordinator account "
+            "reassigned and reactivated by Admin"
+        )
+
+    else:
+        # Never-activated historical account:
+        # issue a completely fresh invitation.
+        token = create_activation_token(
+            existing.email
+        )
+
+        existing.is_active = False
+        existing.activation_token_hash = (
+            hash_token(token)
+        )
+        existing.activation_expires_at = (
+            activation_expiry_dt()
+        )
+
+        history_action = "reinvited"
+        history_note = (
+            "Existing College Coordinator account "
+            "reassigned with a fresh activation invitation"
+        )
+
+    await add_faculty_access_history(
+        db=db,
+        faculty_id=existing.id,
+        action=history_action,
+        college=existing.college,
+        previous_role=previous_role,
+        new_role=existing.role,
+        previous_parent_faculty_id=(
+            previous_parent_faculty_id
+        ),
+        new_parent_faculty_id=(
+            existing.parent_faculty_id
+        ),
+        department_id=existing.department_id,
+        changed_by_admin_id=created_by_admin_id,
+        note=history_note,
+    )
+
+    try:
+        await db.commit()
+        await db.refresh(existing)
+    except Exception:
+        await db.rollback()
+        raise
+
+    email_sent = False
+
+    if token is not None:
+        email_sent = await send_faculty_activation_email(
+            existing,
+            token,
+        )
+
+    return existing, email_sent
+
+
 async def create_faculty(
     payload: FacultyCreateRequest,
     db: AsyncSession,
@@ -477,6 +760,18 @@ async def create_faculty(
         -> commit
         -> send activation email
     """
+
+    reused = await reuse_inactive_college_coordinator(
+        payload=payload,
+        db=db,
+        image_bytes=image_bytes,
+        image_content_type=image_content_type,
+        image_filename=image_filename,
+        created_by_admin_id=created_by_admin_id,
+    )
+
+    if reused is not None:
+        return reused
 
     try:
         faculty, token = await prepare_faculty_creation(

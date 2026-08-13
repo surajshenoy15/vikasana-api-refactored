@@ -47,6 +47,7 @@ from app.features.faculty.service import (
     activate_faculty,
     update_faculty,
     resend_faculty_activation,
+    add_faculty_access_history,
 )
 
 from app.features.faculty.role_policy import (
@@ -752,6 +753,23 @@ async def list_faculty(
             ) == normalized_role
         )
 
+        # College Coordinator hierarchy views represent the current
+        # assignment, not every historical Coordinator row.
+        #
+        # Keep:
+        # - active Coordinator accounts
+        # - pending-activation Coordinator accounts
+        #
+        # Hide:
+        # - historical Coordinators explicitly removed by Admin
+        if normalized_role == ROLE_COLLEGE_COORDINATOR:
+            stmt = stmt.where(
+                or_(
+                    Faculty.is_active.is_(True),
+                    Faculty.activation_token_hash.is_not(None),
+                )
+            )
+
     if parent_faculty_id is not None:
         stmt = stmt.where(
             Faculty.parent_faculty_id == parent_faculty_id
@@ -828,10 +846,16 @@ async def delete_faculty(
     admin: Admin = Depends(get_current_admin),
 ):
     """
-    Historical Faculty records must never be physically deleted.
+    Non-destructive Faculty removal.
 
-    This legacy DELETE endpoint is intentionally retained for frontend
-    backward compatibility, but its behavior is now non-destructive.
+    Historical Faculty rows are never physically deleted.
+
+    Removing an account:
+    - marks it inactive,
+    - revokes any pending activation invitation,
+    - invalidates outstanding OTP activation sessions,
+    - preserves password/hierarchy/provenance,
+    - records an immutable access-history entry.
     """
 
     result = await db.execute(
@@ -848,14 +872,56 @@ async def delete_faculty(
             detail="Faculty not found",
         )
 
-    if not faculty.is_active:
-        return {
-            "detail": f"Faculty {faculty_id} is already inactive",
-            "faculty_id": faculty_id,
-            "is_active": False,
-        }
+    was_active = bool(faculty.is_active)
+    had_pending_activation = bool(
+        faculty.activation_token_hash
+    )
+
+    # -----------------------------------------------------
+    # Soft deactivate.
+    # -----------------------------------------------------
 
     faculty.is_active = False
+
+    # A removed pending account must never be able to use
+    # an old invitation link to reactivate itself.
+    faculty.activation_token_hash = None
+    faculty.activation_expires_at = None
+
+    # Invalidate every OTP / set-password activation session.
+    await db.execute(
+        delete(FacultyActivationSession).where(
+            FacultyActivationSession.faculty_id
+            == faculty.id
+        )
+    )
+
+    changed = (
+        was_active
+        or had_pending_activation
+    )
+
+    if changed:
+        await add_faculty_access_history(
+            db=db,
+            faculty_id=faculty.id,
+            action="deactivated",
+            college=faculty.college,
+            previous_role=faculty.role,
+            new_role=faculty.role,
+            previous_parent_faculty_id=(
+                faculty.parent_faculty_id
+            ),
+            new_parent_faculty_id=(
+                faculty.parent_faculty_id
+            ),
+            department_id=faculty.department_id,
+            changed_by_admin_id=admin.id,
+            note=(
+                "Faculty account deactivated; "
+                "pending activation access revoked"
+            ),
+        )
 
     try:
         await db.commit()
@@ -865,9 +931,14 @@ async def delete_faculty(
         raise
 
     return {
-        "detail": f"Faculty {faculty_id} deactivated",
+        "detail": (
+            f"Faculty {faculty_id} deactivated"
+            if changed
+            else f"Faculty {faculty_id} is already inactive"
+        ),
         "faculty_id": faculty.id,
         "is_active": faculty.is_active,
+        "activation_revoked": True,
     }
 
 
