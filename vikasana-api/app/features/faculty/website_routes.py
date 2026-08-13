@@ -384,7 +384,7 @@ async def get_website_faculty_dashboard_stats(
 ) -> WebsiteFacultyDashboardStatsOut:
     """
     Return read-only dashboard statistics within the authenticated
-    College Coordinator, HOD, or Faculty Coordinator scope.
+    College Coordinator or HOD scope.
 
     Department architecture must be enabled for the Faculty college.
     """
@@ -419,7 +419,7 @@ async def list_website_faculty_students(
     College Coordinator:
         all students in the same college.
 
-    HOD and Faculty Coordinator:
+    HOD:
         all students in the same college and department.
     """
     return await list_students_within_website_scope(

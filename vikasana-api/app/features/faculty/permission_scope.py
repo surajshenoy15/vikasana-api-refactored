@@ -4,7 +4,6 @@ from typing import Any, Protocol
 
 from app.features.faculty.role_policy import (
     ROLE_COLLEGE_COORDINATOR,
-    ROLE_FACULTY_COORDINATOR,
     ROLE_HOD,
     normalize_faculty_role,
 )
@@ -64,8 +63,7 @@ def resolve_website_faculty_scope(
 
     College Coordinator receives college-wide access.
 
-    HOD and Faculty Coordinator receive access only to their own
-    department.
+    HOD receives access only to its own department.
     """
     faculty_id = getattr(faculty, "id", None)
 
@@ -134,7 +132,7 @@ def student_is_within_faculty_scope(
     College Coordinator:
         same college
 
-    HOD and Faculty Coordinator:
+    HOD:
         same college and department
     """
     if _college_key(

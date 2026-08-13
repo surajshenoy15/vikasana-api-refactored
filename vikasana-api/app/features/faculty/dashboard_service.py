@@ -92,7 +92,7 @@ async def get_website_faculty_dashboard_stats(
 ) -> WebsiteFacultyDashboardStatsOut:
     """
     Return read-only website dashboard totals within the authenticated
-    College Coordinator, HOD, or Faculty Coordinator scope.
+    College Coordinator or HOD scope.
 
     EventSubmission and Certificate queries join Student before the
     existing Student scope filter is applied because those tables do not

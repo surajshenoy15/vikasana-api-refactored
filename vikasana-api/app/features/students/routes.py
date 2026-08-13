@@ -8,6 +8,11 @@ from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.core.dependencies import get_current_faculty, get_current_admin, get_current_student
 from app.features.faculty.models import Faculty
+from app.features.faculty.role_policy import (
+    ROLE_FACULTY,
+    ROLE_HOD,
+    normalize_faculty_role,
+)
 from app.features.auth.models import Admin
 from app.features.students.models import Student, StudentType
 from app.features.events.models import Event, EventSubmission
@@ -47,13 +52,191 @@ from app.features.students.schemas.student import (
 
 from app.features.organization.models import College, CollegeAlias
 
-from app.features.organization.service import require_department_architecture_enabled
+from app.features.organization.service import (
+    get_organization_settings,
+    require_department_architecture_enabled,
+)
 from app.features.students.schemas.assignment import StudentAssignmentUpdateRequest
 from app.features.students.service import apply_student_assignment_update
 
 from app.features.students.schemas.assignment import StudentBulkAssignmentRequest
 from app.features.students.schemas.assignment import StudentBulkAssignmentResponse
 from app.features.students.service import apply_bulk_student_assignment_update
+
+
+def _require_student_creation_faculty_role(
+    faculty: Faculty,
+) -> str:
+    """
+    Student creation through Faculty-authenticated routes is allowed
+    only for HOD and Faculty/Mentor accounts.
+
+    Admin uses the separate Admin student routes.
+    College Coordinator and Faculty Coordinator must not create
+    students through these endpoints.
+    """
+    try:
+        role = normalize_faculty_role(
+            getattr(faculty, "role", "")
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=403,
+            detail="This Faculty account cannot create students",
+        ) from error
+
+    if role not in {
+        ROLE_FACULTY,
+        ROLE_HOD,
+    }:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only HOD or Faculty/Mentor accounts "
+                "can create students"
+            ),
+        )
+
+    return role
+
+
+async def _prepare_manual_student_create_payload(
+    *,
+    db: AsyncSession,
+    payload: StudentCreate,
+    faculty: Faculty,
+    role: str,
+) -> StudentCreate:
+    """
+    Derive hierarchy-sensitive student assignment fields from the
+    authenticated Faculty account.
+
+    Creator provenance remains handled separately through faculty_id /
+    changed_by_faculty_id when create_student() is called.
+    """
+
+    faculty_department_id = getattr(
+        faculty,
+        "department_id",
+        None,
+    )
+
+    # ---------------------------------------------------------
+    # Faculty/Mentor
+    # ---------------------------------------------------------
+    if role == ROLE_FACULTY:
+        # Legacy Faculty accounts may not yet have department_id.
+        # Preserve that behavior: created_by_faculty_id remains the
+        # legacy mentor link and assigned_faculty_id stays unset.
+        if faculty_department_id is None:
+            if payload.assigned_faculty_id not in (
+                None,
+                faculty.id,
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Faculty/Mentor cannot assign a student "
+                        "to another Faculty/Mentor"
+                    ),
+                )
+
+            return payload.model_copy(
+                update={
+                    "assigned_faculty_id": None,
+                }
+            )
+
+        if (
+            payload.department_id is not None
+            and payload.department_id != faculty_department_id
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Faculty/Mentor can create students only "
+                    "inside their own department"
+                ),
+            )
+
+        if (
+            payload.assigned_faculty_id is not None
+            and payload.assigned_faculty_id != faculty.id
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Faculty/Mentor cannot assign a student "
+                    "to another Faculty/Mentor"
+                ),
+            )
+
+        return payload.model_copy(
+            update={
+                "department_id": faculty_department_id,
+                "assigned_faculty_id": faculty.id,
+            }
+        )
+
+    # ---------------------------------------------------------
+    # HOD
+    # ---------------------------------------------------------
+    if role == ROLE_HOD:
+        if faculty_department_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail="HOD department is not assigned",
+            )
+
+        if (
+            payload.department_id is not None
+            and payload.department_id != faculty_department_id
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "HOD can create students only inside "
+                    "their own department"
+                ),
+            )
+
+        assigned_faculty_id = payload.assigned_faculty_id
+
+        if assigned_faculty_id is not None:
+            result = await db.execute(
+                select(Faculty).where(
+                    Faculty.id == assigned_faculty_id,
+                    Faculty.college == faculty.college,
+                    Faculty.department_id == faculty_department_id,
+                    Faculty.parent_faculty_id == faculty.id,
+                    Faculty.role == ROLE_FACULTY,
+                    Faculty.is_active.is_(True),
+                )
+            )
+
+            assigned_faculty = result.scalar_one_or_none()
+
+            if assigned_faculty is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Selected Faculty/Mentor must be active, "
+                        "belong to the HOD's department, and be "
+                        "directly under this HOD"
+                    ),
+                )
+
+        return payload.model_copy(
+            update={
+                "department_id": faculty_department_id,
+                "assigned_faculty_id": assigned_faculty_id,
+            }
+        )
+
+    raise HTTPException(
+        status_code=403,
+        detail="This Faculty account cannot create students",
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -266,10 +449,21 @@ async def add_student_manual(
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),
 ):
+    role = _require_student_creation_faculty_role(
+        current_faculty
+    )
+
+    safe_payload = await _prepare_manual_student_create_payload(
+        db=db,
+        payload=payload,
+        faculty=current_faculty,
+        role=role,
+    )
+
     try:
         s = await create_student(
             db,
-            payload,
+            safe_payload,
             faculty_college=current_faculty.college,
             faculty_id=current_faculty.id,
             changed_by_faculty_id=current_faculty.id,
@@ -288,6 +482,10 @@ async def add_students_bulk(
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),
 ):
+    role = _require_student_creation_faculty_role(
+        current_faculty
+    )
+
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only .csv file is allowed")
 
@@ -300,6 +498,9 @@ async def add_students_bulk(
         faculty_college=current_faculty.college,
         faculty_id=current_faculty.id,
         changed_by_faculty_id=current_faculty.id,
+        hierarchy_role=role,
+        hierarchy_department_id=current_faculty.department_id,
+        hierarchy_faculty_id=current_faculty.id,
     )
 
     return BulkUploadResult(
@@ -324,12 +525,26 @@ async def add_student_manual_admin(
     try:
         # Admin can set college from payload.
         # faculty_id is None because admin is creating directly.
+        admin_student_college = (
+            getattr(payload, "college", None)
+            or getattr(payload, "college_name", None)
+            or "BNMIT"
+        )
+
+        organization_settings = await get_organization_settings(
+            db,
+            admin_student_college,
+        )
+
         s = await create_student(
             db,
             payload,
-            faculty_college=getattr(payload, "college", None) or getattr(payload, "college_name", None) or "BNMIT",
+            faculty_college=admin_student_college,
             faculty_id=None,
             changed_by_admin_id=current_admin.id,
+            require_hierarchy_faculty=(
+                organization_settings.department_architecture_enabled
+            ),
         )
 
         return _student_out(s, activities_count=0, certificates_count=0)

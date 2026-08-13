@@ -12,6 +12,10 @@ from app.features.auth.models import Admin
 from app.features.faculty.models import Faculty, FacultyActivationSession
 from app.features.students.models import Student
 from app.features.organization.models import College, CollegeAlias
+from app.features.organization.service import (
+    _college_scope_names,
+    get_organization_settings,
+)
 
 from app.features.activities.models import ActivitySession, ActivitySessionStatus
 
@@ -44,7 +48,11 @@ from app.features.faculty.service import (
     update_faculty,
 )
 
-from app.features.faculty.role_policy import normalize_faculty_role
+from app.features.faculty.role_policy import (
+    ROLE_FACULTY,
+    ROLE_HOD,
+    normalize_faculty_role,
+)
 
 from pydantic import BaseModel
 
@@ -62,6 +70,7 @@ async def add_faculty(
     email: str = Form(...),
     role: str = Form("faculty"),
     department_id: int | None = Form(None),
+    parent_faculty_id: int | None = Form(None),
     image: UploadFile | None = File(None),
     db: AsyncSession = Depends(get_db),
     admin: Admin = Depends(get_current_admin),
@@ -74,6 +83,172 @@ async def add_faculty(
         department_id=department_id,
     )
 
+    validated_parent_faculty_id: int | None = None
+
+    # -----------------------------------------------------
+    # Admin -> Faculty/Mentor hierarchy enforcement
+    # -----------------------------------------------------
+    if payload.role == ROLE_FACULTY:
+        normalized_college = payload.college.strip().casefold()
+
+        canonical_result = await db.execute(
+            select(College).where(
+                func.lower(func.trim(College.name))
+                == normalized_college
+            )
+        )
+
+        canonical_college = (
+            canonical_result.scalar_one_or_none()
+        )
+
+        if canonical_college is None:
+            alias_result = await db.execute(
+                select(College)
+                .join(
+                    CollegeAlias,
+                    CollegeAlias.college_id == College.id,
+                )
+                .where(
+                    CollegeAlias.is_active.is_(True),
+                    func.lower(func.trim(CollegeAlias.alias))
+                    == normalized_college,
+                )
+            )
+
+            canonical_college = (
+                alias_result.scalars().first()
+            )
+
+        if canonical_college is not None:
+            accepted_college_names = await _college_scope_names(
+                db,
+                canonical_college,
+            )
+
+            # New Admin-created hierarchy records use the canonical
+            # college name. Historical Faculty records and aliases
+            # remain untouched.
+            payload = payload.model_copy(
+                update={
+                    "college": canonical_college.name,
+                }
+            )
+
+            settings_college = canonical_college.name
+        else:
+            accepted_college_names = [
+                normalized_college
+            ]
+            settings_college = payload.college
+
+        organization_settings = await get_organization_settings(
+            db,
+            settings_college,
+        )
+
+        if organization_settings.department_architecture_enabled:
+            if payload.department_id is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "department_id is required when department "
+                        "architecture is enabled"
+                    ),
+                )
+
+            if parent_faculty_id is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "parent_faculty_id is required for "
+                        "Faculty/Mentor creation when department "
+                        "architecture is enabled"
+                    ),
+                )
+
+        if parent_faculty_id is not None:
+            parent_result = await db.execute(
+                select(Faculty).where(
+                    Faculty.id == parent_faculty_id,
+                    Faculty.is_active.is_(True),
+                )
+            )
+
+            parent_faculty = (
+                parent_result.scalar_one_or_none()
+            )
+
+            if parent_faculty is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Selected HOD was not found or is inactive",
+                )
+
+            try:
+                parent_role = normalize_faculty_role(
+                    parent_faculty.role
+                )
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Selected parent has an invalid Faculty role",
+                ) from error
+
+            if parent_role != ROLE_HOD:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Faculty/Mentor parent must be an HOD"
+                    ),
+                )
+
+            parent_college_key = (
+                str(parent_faculty.college)
+                .strip()
+                .casefold()
+            )
+
+            if parent_college_key not in accepted_college_names:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Selected HOD must belong to the same college"
+                    ),
+                )
+
+            if payload.department_id is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "department_id is required when assigning "
+                        "an HOD parent"
+                    ),
+                )
+
+            if (
+                parent_faculty.department_id
+                != payload.department_id
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Selected HOD must belong to the same "
+                        "department as the Faculty/Mentor"
+                    ),
+                )
+
+            validated_parent_faculty_id = parent_faculty.id
+
+    elif parent_faculty_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "parent_faculty_id on this Admin endpoint is "
+                "currently supported only for Faculty/Mentor creation"
+            ),
+        )
+
     image_bytes = None
     if image:
         image_bytes = await image.read()
@@ -84,6 +259,7 @@ async def add_faculty(
         image_bytes=image_bytes,
         image_content_type=image.content_type if image else None,
         image_filename=image.filename if image else None,
+        parent_faculty_id=validated_parent_faculty_id,
         created_by_admin_id=admin.id,
     )
 
@@ -152,6 +328,24 @@ async def import_faculty_csv(
                 if department_id <= 0:
                     raise ValueError("department_id must be a positive integer")
 
+            raw_parent_faculty_id = (
+                row.get("parent_faculty_id") or ""
+            ).strip()
+            parent_faculty_id: int | None = None
+
+            if raw_parent_faculty_id:
+                try:
+                    parent_faculty_id = int(raw_parent_faculty_id)
+                except ValueError:
+                    raise ValueError(
+                        "parent_faculty_id must be a positive integer"
+                    )
+
+                if parent_faculty_id <= 0:
+                    raise ValueError(
+                        "parent_faculty_id must be a positive integer"
+                    )
+
             if not full_name:
                 raise ValueError("full_name is required")
             if not email or "@" not in email:
@@ -171,12 +365,163 @@ async def import_faculty_csv(
                 department_id=department_id,
             )
 
+            validated_parent_faculty_id: int | None = None
+
+            if payload.role == ROLE_FACULTY:
+                normalized_college = (
+                    payload.college.strip().casefold()
+                )
+
+                canonical_result = await db.execute(
+                    select(College).where(
+                        func.lower(func.trim(College.name))
+                        == normalized_college
+                    )
+                )
+                canonical_college = (
+                    canonical_result.scalar_one_or_none()
+                )
+
+                if canonical_college is None:
+                    alias_result = await db.execute(
+                        select(College)
+                        .join(
+                            CollegeAlias,
+                            CollegeAlias.college_id == College.id,
+                        )
+                        .where(
+                            CollegeAlias.is_active.is_(True),
+                            func.lower(
+                                func.trim(CollegeAlias.alias)
+                            ) == normalized_college,
+                        )
+                    )
+                    canonical_college = (
+                        alias_result.scalars().first()
+                    )
+
+                if canonical_college is not None:
+                    accepted_college_names = (
+                        await _college_scope_names(
+                            db,
+                            canonical_college,
+                        )
+                    )
+
+                    payload = payload.model_copy(
+                        update={
+                            "college": canonical_college.name,
+                        }
+                    )
+
+                    settings_college = canonical_college.name
+                else:
+                    accepted_college_names = [
+                        normalized_college
+                    ]
+                    settings_college = payload.college
+
+                organization_settings = (
+                    await get_organization_settings(
+                        db,
+                        settings_college,
+                    )
+                )
+
+                if (
+                    organization_settings
+                    .department_architecture_enabled
+                ):
+                    if payload.department_id is None:
+                        raise ValueError(
+                            "department_id is required when "
+                            "department architecture is enabled"
+                        )
+
+                    if parent_faculty_id is None:
+                        raise ValueError(
+                            "parent_faculty_id is required for "
+                            "Faculty/Mentor creation when department "
+                            "architecture is enabled"
+                        )
+
+                if parent_faculty_id is not None:
+                    parent_result = await db.execute(
+                        select(Faculty).where(
+                            Faculty.id == parent_faculty_id,
+                            Faculty.is_active.is_(True),
+                        )
+                    )
+
+                    parent_faculty = (
+                        parent_result.scalar_one_or_none()
+                    )
+
+                    if parent_faculty is None:
+                        raise ValueError(
+                            "Selected HOD was not found or is inactive"
+                        )
+
+                    try:
+                        parent_role = normalize_faculty_role(
+                            parent_faculty.role
+                        )
+                    except ValueError as error:
+                        raise ValueError(
+                            "Selected parent has an invalid Faculty role"
+                        ) from error
+
+                    if parent_role != ROLE_HOD:
+                        raise ValueError(
+                            "Faculty/Mentor parent must be an HOD"
+                        )
+
+                    parent_college_key = (
+                        str(parent_faculty.college)
+                        .strip()
+                        .casefold()
+                    )
+
+                    if (
+                        parent_college_key
+                        not in accepted_college_names
+                    ):
+                        raise ValueError(
+                            "Selected HOD must belong to the same college"
+                        )
+
+                    if payload.department_id is None:
+                        raise ValueError(
+                            "department_id is required when "
+                            "assigning an HOD parent"
+                        )
+
+                    if (
+                        parent_faculty.department_id
+                        != payload.department_id
+                    ):
+                        raise ValueError(
+                            "Selected HOD must belong to the same "
+                            "department as the Faculty/Mentor"
+                        )
+
+                    validated_parent_faculty_id = (
+                        parent_faculty.id
+                    )
+
+            elif parent_faculty_id is not None:
+                raise ValueError(
+                    "parent_faculty_id is supported only for "
+                    "Faculty/Mentor creation"
+                )
+
             faculty, email_sent = await create_faculty(
                 payload=payload,
                 db=db,
                 image_bytes=None,
                 image_content_type=None,
                 image_filename=None,
+                parent_faculty_id=validated_parent_faculty_id,
                 created_by_admin_id=admin.id,
             )
 

@@ -10,6 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import asyncio
 from app.features.faculty.models import Faculty
+from app.features.faculty.role_policy import (
+    ROLE_FACULTY,
+    ROLE_HOD,
+    normalize_faculty_role,
+)
 from app.features.students.models import Student, StudentType
 from app.features.students.schemas.student import StudentCreate
 from app.core.email_service import send_student_welcome_email
@@ -62,7 +67,11 @@ def _reactivate_student(
     s.required_total_points = _required_points_for_type(student_type)
     s.passout_year = passout_year
     s.admitted_year = admitted_year
-    s.created_by_faculty_id = faculty_id
+
+    # Preserve original creator provenance on reactivation.
+    # Only backfill legacy rows where creator provenance is missing.
+    if s.created_by_faculty_id is None:
+        s.created_by_faculty_id = faculty_id
 
     # Do NOT reset earned points/certificates here.
     # Old activity/certificate history remains attached to the same student id.
@@ -274,6 +283,7 @@ async def validate_student_academic_assignment(
     batch_id: int | None = None,
     current_year: int | None = None,
     assigned_faculty_id: int | None = None,
+    require_hierarchy_faculty: bool = False,
 ):
     """
     Validate optional department-wise student assignments.
@@ -403,6 +413,80 @@ async def validate_student_academic_assignment(
                     "selected department"
                 ),
             )
+
+        if require_hierarchy_faculty:
+            try:
+                assigned_role = normalize_faculty_role(
+                    assigned_faculty.role
+                )
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Assigned account has an invalid Faculty role",
+                ) from error
+
+            if assigned_role != ROLE_FACULTY:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "assigned_faculty_id must reference a "
+                        "Faculty/Mentor account"
+                    ),
+                )
+
+            parent_faculty_id = getattr(
+                assigned_faculty,
+                "parent_faculty_id",
+                None,
+            )
+
+            if parent_faculty_id is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Assigned Faculty/Mentor must be directly "
+                        "under an active HOD"
+                    ),
+                )
+
+            parent_result = await db.execute(
+                select(Faculty).where(
+                    Faculty.id == parent_faculty_id,
+                    Faculty.college == college_value,
+                    Faculty.department_id == department_id,
+                    Faculty.is_active.is_(True),
+                )
+            )
+
+            parent_faculty = parent_result.scalar_one_or_none()
+
+            if parent_faculty is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Assigned Faculty/Mentor must be directly "
+                        "under an active HOD in the same college "
+                        "and department"
+                    ),
+                )
+
+            try:
+                parent_role = normalize_faculty_role(
+                    parent_faculty.role
+                )
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Assigned Faculty/Mentor parent has an invalid role",
+                ) from error
+
+            if parent_role != ROLE_HOD:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Assigned Faculty/Mentor parent must be an HOD"
+                    ),
+                )
 
     return department, batch, assigned_faculty
 
@@ -720,6 +804,7 @@ async def create_student(
     faculty_id: int | None = None,
     changed_by_faculty_id: int | None = None,
     changed_by_admin_id: int | None = None,
+    require_hierarchy_faculty: bool = False,
 ) -> Student:
     faculty_college = (faculty_college or "").strip()
 
@@ -825,6 +910,7 @@ async def create_student(
             batch_id=target_batch_id,
             current_year=target_current_year,
             assigned_faculty_id=target_assigned_faculty_id,
+            require_hierarchy_faculty=require_hierarchy_faculty,
         )
 
     # ✅ Permanent fix: restore deleted/deactivated student
@@ -928,6 +1014,9 @@ async def create_students_from_csv(
     changed_by_admin_id: int | None = None,
     allow_csv_college: bool = False,
     allow_csv_faculty_email: bool = False,
+    hierarchy_role: str | None = None,
+    hierarchy_department_id: int | None = None,
+    hierarchy_faculty_id: int | None = None,
 ) -> Tuple[int, int, int, int, List[str]]:
     """
     Faculty upload CSV:
@@ -1124,8 +1213,7 @@ async def create_students_from_csv(
             }.intersection(headers)
 
             # If the matching student is inactive, omitted CSV columns
-            # preserve the existing academic assignment. A present but
-            # blank optional column explicitly clears that field.
+            # normally preserve the existing academic assignment.
             inactive_student = (
                 inactive_by_usn.get((college_key, usn_key))
                 or inactive_by_email.get((college_key, email_key))
@@ -1174,8 +1262,74 @@ async def create_students_from_csv(
                 target_current_year = current_year
                 target_assigned_faculty_id = assigned_faculty_id
 
-            should_validate_assignment = bool(
-                academic_headers
+            # -------------------------------------------------
+            # Authenticated Faculty/HOD hierarchy enforcement.
+            #
+            # Admin bulk upload does not pass hierarchy_role and
+            # therefore retains its existing full override behavior.
+            # -------------------------------------------------
+            if hierarchy_role == ROLE_FACULTY:
+                if (
+                    "department_id" in headers
+                    and department_id is not None
+                    and department_id != hierarchy_department_id
+                ):
+                    raise ValueError(
+                        "Faculty/Mentor can bulk-create students "
+                        "only inside their own department"
+                    )
+
+                if (
+                    "assigned_faculty_id" in headers
+                    and assigned_faculty_id is not None
+                    and assigned_faculty_id != hierarchy_faculty_id
+                ):
+                    raise ValueError(
+                        "Faculty/Mentor cannot assign a student "
+                        "to another Faculty/Mentor"
+                    )
+
+                target_department_id = hierarchy_department_id
+
+                # Preserve legacy Faculty behavior when no department
+                # has yet been assigned. created_by_faculty_id remains
+                # the legacy mentor provenance.
+                target_assigned_faculty_id = (
+                    hierarchy_faculty_id
+                    if hierarchy_department_id is not None
+                    else None
+                )
+
+            elif hierarchy_role == ROLE_HOD:
+                if hierarchy_department_id is None:
+                    raise ValueError(
+                        "HOD department is not assigned"
+                    )
+
+                if (
+                    "department_id" in headers
+                    and department_id is not None
+                    and department_id != hierarchy_department_id
+                ):
+                    raise ValueError(
+                        "HOD can bulk-create students only "
+                        "inside their own department"
+                    )
+
+                target_department_id = hierarchy_department_id
+
+                # HOD assignment is explicit. If the CSV omits
+                # assigned_faculty_id, do not preserve a historical
+                # mentor that may be outside the HOD hierarchy.
+                target_assigned_faculty_id = (
+                    assigned_faculty_id
+                    if "assigned_faculty_id" in headers
+                    else None
+                )
+
+            should_validate_assignment = (
+                hierarchy_role is not None
+                or bool(academic_headers)
             ) and any(
                 value is not None
                 for value in (
@@ -1197,6 +1351,36 @@ async def create_students_from_csv(
                         target_assigned_faculty_id
                     ),
                 )
+
+            # HOD may assign only an active Faculty/Mentor directly
+            # beneath that authenticated HOD.
+            if (
+                hierarchy_role == ROLE_HOD
+                and target_assigned_faculty_id is not None
+            ):
+                hierarchy_result = await db.execute(
+                    select(Faculty).where(
+                        Faculty.id == target_assigned_faculty_id,
+                        Faculty.college == row_college,
+                        Faculty.department_id
+                        == hierarchy_department_id,
+                        Faculty.parent_faculty_id
+                        == hierarchy_faculty_id,
+                        Faculty.role == ROLE_FACULTY,
+                        Faculty.is_active.is_(True),
+                    )
+                )
+
+                hierarchy_faculty = (
+                    hierarchy_result.scalar_one_or_none()
+                )
+
+                if hierarchy_faculty is None:
+                    raise ValueError(
+                        "Selected Faculty/Mentor must be active, "
+                        "belong to the HOD's department, and be "
+                        "directly under this HOD"
+                    )
 
             # ✅ Permanent fix:
             # If same USN/email exists but inactive, restore that
