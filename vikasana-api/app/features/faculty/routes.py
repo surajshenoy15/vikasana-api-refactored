@@ -49,6 +49,7 @@ from app.features.faculty.service import (
 )
 
 from app.features.faculty.role_policy import (
+    ROLE_COLLEGE_COORDINATOR,
     ROLE_FACULTY,
     ROLE_HOD,
     normalize_faculty_role,
@@ -240,12 +241,132 @@ async def add_faculty(
 
             validated_parent_faculty_id = parent_faculty.id
 
+    elif payload.role == ROLE_HOD:
+        if payload.department_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="department_id is required for HOD creation",
+            )
+
+        if parent_faculty_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "parent_faculty_id is required for HOD creation "
+                    "and must reference the College Coordinator"
+                ),
+            )
+
+        normalized_college = payload.college.strip().casefold()
+
+        canonical_result = await db.execute(
+            select(College).where(
+                func.lower(func.trim(College.name))
+                == normalized_college
+            )
+        )
+
+        canonical_college = (
+            canonical_result.scalar_one_or_none()
+        )
+
+        if canonical_college is None:
+            alias_result = await db.execute(
+                select(College)
+                .join(
+                    CollegeAlias,
+                    CollegeAlias.college_id == College.id,
+                )
+                .where(
+                    CollegeAlias.is_active.is_(True),
+                    func.lower(func.trim(CollegeAlias.alias))
+                    == normalized_college,
+                )
+            )
+
+            canonical_college = (
+                alias_result.scalars().first()
+            )
+
+        if canonical_college is not None:
+            accepted_college_names = await _college_scope_names(
+                db,
+                canonical_college,
+            )
+
+            payload = payload.model_copy(
+                update={
+                    "college": canonical_college.name,
+                }
+            )
+        else:
+            accepted_college_names = [
+                normalized_college
+            ]
+
+        parent_result = await db.execute(
+            select(Faculty).where(
+                Faculty.id == parent_faculty_id,
+                Faculty.is_active.is_(True),
+            )
+        )
+
+        parent_faculty = (
+            parent_result.scalar_one_or_none()
+        )
+
+        if parent_faculty is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Selected College Coordinator was not found "
+                    "or is inactive"
+                ),
+            )
+
+        try:
+            parent_role = normalize_faculty_role(
+                parent_faculty.role
+            )
+        except ValueError as error:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Selected parent has an invalid Faculty role"
+                ),
+            ) from error
+
+        if parent_role != ROLE_COLLEGE_COORDINATOR:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "HOD parent must be a College Coordinator"
+                ),
+            )
+
+        parent_college_key = (
+            str(parent_faculty.college)
+            .strip()
+            .casefold()
+        )
+
+        if parent_college_key not in accepted_college_names:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Selected College Coordinator must belong "
+                    "to the same college"
+                ),
+            )
+
+        validated_parent_faculty_id = parent_faculty.id
+
     elif parent_faculty_id is not None:
         raise HTTPException(
             status_code=400,
             detail=(
-                "parent_faculty_id on this Admin endpoint is "
-                "currently supported only for Faculty/Mentor creation"
+                "parent_faculty_id is supported only for "
+                "HOD and Faculty/Mentor hierarchy creation"
             ),
         )
 
