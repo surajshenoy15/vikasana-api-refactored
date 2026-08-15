@@ -290,7 +290,7 @@ def _student_out(
         usn=s.usn,
         branch=s.branch,
         email=s.email,
-        student_type=str(s.student_type),
+        student_type=s.student_type.value,
         passout_year=s.passout_year,
         admitted_year=s.admitted_year,
         college=s.college,
