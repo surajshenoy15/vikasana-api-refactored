@@ -49,6 +49,10 @@ class FacultyResponse(BaseModel):
     is_active: bool
     image_url: str | None = None
     created_at: datetime
+
+    # Allows management UIs to distinguish a pending activation
+    # from an account that Admin has explicitly removed/deactivated.
+    activation_expires_at: datetime | None = None
     department_id: int | None = None
     legacy_college_scope: bool = False
 
