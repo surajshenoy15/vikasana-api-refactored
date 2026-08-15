@@ -50,7 +50,11 @@ from app.features.students.schemas.student import (
     StudentPointAdjustmentWriteResponse,
 )
 
-from app.features.organization.models import College, CollegeAlias
+from app.features.organization.models import (
+    College,
+    CollegeAlias,
+    Department,
+)
 
 from app.features.organization.service import (
     get_organization_settings,
@@ -407,12 +411,36 @@ async def list_students(
 
     if q and q.strip():
         like = f"%{q.strip()}%"
+
         stmt = stmt.where(
             or_(
                 Student.name.ilike(like),
                 Student.usn.ilike(like),
                 Student.branch.ilike(like),
                 Student.email.ilike(like),
+                Department.name.ilike(like),
+                Department.code.ilike(like),
+            )
+        )
+
+    if department_id is not None:
+        stmt = stmt.where(
+            Student.department_id == department_id
+        )
+
+    if department_q and department_q.strip():
+        department_like = (
+            f"%{department_q.strip()}%"
+        )
+
+        stmt = stmt.where(
+            or_(
+                Department.name.ilike(
+                    department_like
+                ),
+                Department.code.ilike(
+                    department_like
+                ),
             )
         )
 
@@ -604,8 +632,41 @@ async def list_students_admin(
         description="Optional filter by assigned Faculty/Mentor ID.",
     ),
 
-    # ✅ NEW: active / inactive filter
-    is_active: bool | None = Query(True, description="Optional filter: true=active, false=inactive"),
+    department_id: int | None = Query(
+        None,
+        ge=1,
+        description="Optional filter by department ID.",
+    ),
+
+    department_q: str | None = Query(
+        None,
+        description="Optional department name/code search.",
+    ),
+
+    status_filter: str | None = Query(
+        None,
+        alias="status",
+        description="Optional status filter: all, active or inactive.",
+    ),
+
+    sort_by: str = Query(
+        "newest",
+        description=(
+            "Sort by newest, name, usn, department "
+            "or current_year."
+        ),
+    ),
+
+    sort_order: str = Query(
+        "asc",
+        description="Sort order: asc or desc.",
+    ),
+
+    # Preserve legacy callers that use ?is_active=true/false.
+    is_active: bool | None = Query(
+        True,
+        description="Legacy active/inactive filter.",
+    ),
 
     limit: int | None = Query(None, ge=1, le=10000),
     offset: int = Query(0, ge=0),
@@ -639,11 +700,50 @@ async def list_students_admin(
         .options(selectinload(Student.created_by_faculty))
         .outerjoin(activities_sq, activities_sq.c.student_id == Student.id)
         .outerjoin(certs_sq, certs_sq.c.student_id == Student.id)
+        .outerjoin(
+            Department,
+            Department.id == Student.department_id,
+        )
     )
 
-    # ✅ NEW: filter active/inactive only when query param is passed
-    if is_active is not None:
-        stmt = stmt.where(Student.is_active == is_active)
+    # --------------------------------------------------------
+    # STATUS FILTER
+    # --------------------------------------------------------
+
+    normalized_status = str(
+        status_filter or ""
+    ).strip().lower()
+
+    if normalized_status:
+        if normalized_status not in {
+            "all",
+            "active",
+            "inactive",
+        }:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "status must be all, active or inactive"
+                ),
+            )
+
+        if normalized_status == "active":
+            stmt = stmt.where(
+                Student.is_active.is_(True)
+            )
+
+        elif normalized_status == "inactive":
+            stmt = stmt.where(
+                Student.is_active.is_(False)
+            )
+
+        # status=all intentionally adds no active filter.
+
+    elif is_active is not None:
+        # Preserve existing behaviour for older callers.
+        stmt = stmt.where(
+            Student.is_active == is_active
+        )
 
     # Canonical college scope for Admin drill-down.
     #
@@ -704,12 +804,36 @@ async def list_students_admin(
 
     if q and q.strip():
         like = f"%{q.strip()}%"
+
         stmt = stmt.where(
             or_(
                 Student.name.ilike(like),
                 Student.usn.ilike(like),
                 Student.branch.ilike(like),
                 Student.email.ilike(like),
+                Department.name.ilike(like),
+                Department.code.ilike(like),
+            )
+        )
+
+    if department_id is not None:
+        stmt = stmt.where(
+            Student.department_id == department_id
+        )
+
+    if department_q and department_q.strip():
+        department_like = (
+            f"%{department_q.strip()}%"
+        )
+
+        stmt = stmt.where(
+            or_(
+                Department.name.ilike(
+                    department_like
+                ),
+                Department.code.ilike(
+                    department_like
+                ),
             )
         )
 
@@ -744,7 +868,96 @@ async def list_students_admin(
             )
         )
 
-    stmt = stmt.order_by(Student.id.desc())
+    normalized_sort_by = str(
+        sort_by or "newest"
+    ).strip().lower()
+
+    normalized_sort_order = str(
+        sort_order or "asc"
+    ).strip().lower()
+
+    allowed_sort_fields = {
+        "newest",
+        "name",
+        "usn",
+        "department",
+        "current_year",
+    }
+
+    if normalized_sort_by not in allowed_sort_fields:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "sort_by must be newest, name, usn, "
+                "department or current_year"
+            ),
+        )
+
+    if normalized_sort_order not in {
+        "asc",
+        "desc",
+    }:
+        raise HTTPException(
+            status_code=422,
+            detail="sort_order must be asc or desc",
+        )
+
+    if normalized_sort_by == "newest":
+        stmt = stmt.order_by(
+            Student.id.desc()
+        )
+
+    elif normalized_sort_by == "name":
+        column = func.lower(
+            Student.name
+        )
+
+        stmt = stmt.order_by(
+            column.desc()
+            if normalized_sort_order == "desc"
+            else column.asc(),
+            Student.id.asc(),
+        )
+
+    elif normalized_sort_by == "usn":
+        column = func.lower(
+            Student.usn
+        )
+
+        stmt = stmt.order_by(
+            column.desc().nullslast()
+            if normalized_sort_order == "desc"
+            else column.asc().nullslast(),
+            Student.id.asc(),
+        )
+
+    elif normalized_sort_by == "department":
+        column = func.lower(
+            Department.name
+        )
+
+        stmt = stmt.order_by(
+            column.desc().nullslast()
+            if normalized_sort_order == "desc"
+            else column.asc().nullslast(),
+            func.lower(
+                Student.name
+            ).asc(),
+            Student.id.asc(),
+        )
+
+    elif normalized_sort_by == "current_year":
+        column = Student.current_year
+
+        stmt = stmt.order_by(
+            column.desc().nullslast()
+            if normalized_sort_order == "desc"
+            else column.asc().nullslast(),
+            func.lower(
+                Student.name
+            ).asc(),
+            Student.id.asc(),
+        )
 
     if limit:
         stmt = stmt.limit(limit)
