@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -211,9 +211,11 @@ async def get_college_details(
         )
     )
 
-    # Organization hierarchy counts include both active and
-    # pending/inactive accounts. Activation state is account status,
-    # not whether the hierarchy relationship exists.
+    # Current organization hierarchy counts include active
+    # accounts and pending-activation accounts.
+    #
+    # Explicitly removed/deactivated historical accounts remain
+    # preserved in the database but are excluded from these counts.
     college_coordinator_count = await db.scalar(
         select(
             func.count(Faculty.id)
@@ -224,6 +226,10 @@ async def get_college_details(
             func.lower(
                 func.trim(Faculty.role)
             ) == ROLE_COLLEGE_COORDINATOR,
+            or_(
+                Faculty.is_active.is_(True),
+                Faculty.activation_token_hash.is_not(None),
+            ),
         )
     )
 
@@ -237,6 +243,10 @@ async def get_college_details(
             func.lower(
                 func.trim(Faculty.role)
             ) == ROLE_HOD,
+            or_(
+                Faculty.is_active.is_(True),
+                Faculty.activation_token_hash.is_not(None),
+            ),
         )
     )
 
@@ -250,6 +260,10 @@ async def get_college_details(
             func.lower(
                 func.trim(Faculty.role)
             ) == ROLE_FACULTY,
+            or_(
+                Faculty.is_active.is_(True),
+                Faculty.activation_token_hash.is_not(None),
+            ),
         )
     )
 
