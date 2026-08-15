@@ -11,7 +11,11 @@ from app.core.dependencies import get_current_admin, get_current_faculty
 from app.features.auth.models import Admin
 from app.features.faculty.models import Faculty, FacultyActivationSession
 from app.features.students.models import Student
-from app.features.organization.models import College, CollegeAlias
+from app.features.organization.models import (
+    College,
+    CollegeAlias,
+    FacultyAccessHistory,
+)
 from app.features.organization.service import (
     _college_scope_names,
     get_organization_settings,
@@ -786,6 +790,134 @@ async def list_faculty(
     return [
         FacultyResponse.model_validate(item)
         for item in items
+    ]
+
+
+@router.get(
+    "/removed",
+    summary="List recently removed Faculty/Mentors (Admin only)",
+)
+async def list_removed_faculty(
+    college_id: int = Query(
+        ...,
+        ge=1,
+        description="Canonical college ID",
+    ),
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(get_current_admin),
+):
+    """
+    Read-only audit view of removed Faculty/Mentor accounts.
+
+    Only accounts with an immutable `deactivated` access-history
+    entry are returned. Pending activation accounts are excluded.
+    Historical Faculty rows remain untouched.
+    """
+
+    college_result = await db.execute(
+        select(College).where(
+            College.id == college_id
+        )
+    )
+
+    college = (
+        college_result.scalar_one_or_none()
+    )
+
+    if college is None:
+        raise HTTPException(
+            status_code=404,
+            detail="College not found",
+        )
+
+    college_names = await _college_scope_names(
+        db,
+        college,
+    )
+
+    # Latest immutable deactivation history row for each Faculty.
+    latest_history_id = (
+        select(
+            FacultyAccessHistory.id
+        )
+        .where(
+            FacultyAccessHistory.faculty_id
+            == Faculty.id,
+            FacultyAccessHistory.action
+            == "deactivated",
+        )
+        .order_by(
+            FacultyAccessHistory.created_at.desc(),
+            FacultyAccessHistory.id.desc(),
+        )
+        .limit(1)
+        .correlate(Faculty)
+        .scalar_subquery()
+    )
+
+    statement = (
+        select(
+            Faculty,
+            FacultyAccessHistory,
+        )
+        .join(
+            FacultyAccessHistory,
+            FacultyAccessHistory.id
+            == latest_history_id,
+        )
+        .where(
+            func.lower(
+                func.trim(Faculty.college)
+            ).in_(college_names),
+            func.lower(
+                func.trim(Faculty.role)
+            ) == ROLE_FACULTY,
+            Faculty.is_active.is_(False),
+
+            # Pending activation accounts are inactive too,
+            # but they are not "removed".
+            Faculty.activation_token_hash.is_(None),
+        )
+        .order_by(
+            FacultyAccessHistory.created_at.desc(),
+            Faculty.id.desc(),
+        )
+    )
+
+    result = await db.execute(
+        statement
+    )
+
+    rows = result.all()
+
+    return [
+        {
+            "id": faculty.id,
+            "full_name": faculty.full_name,
+            "email": faculty.email,
+            "college": faculty.college,
+            "role": faculty.role,
+            "is_active": faculty.is_active,
+            "department_id": faculty.department_id,
+            "parent_faculty_id": faculty.parent_faculty_id,
+            "created_by_admin_id": faculty.created_by_admin_id,
+            "created_by_faculty_id": faculty.created_by_faculty_id,
+            "created_at": faculty.created_at,
+
+            "removed_at": history.created_at,
+            "removed_by_admin_id": history.changed_by_admin_id,
+            "removed_by_faculty_id": history.changed_by_faculty_id,
+
+            "previous_role": history.previous_role,
+            "previous_parent_faculty_id": (
+                history.previous_parent_faculty_id
+            ),
+            "removal_department_id": (
+                history.department_id
+            ),
+            "removal_note": history.note,
+        }
+        for faculty, history in rows
     ]
 
 
