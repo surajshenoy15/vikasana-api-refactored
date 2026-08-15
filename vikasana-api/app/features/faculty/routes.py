@@ -757,16 +757,19 @@ async def list_faculty(
             ) == normalized_role
         )
 
-        # College Coordinator hierarchy views represent the current
-        # assignment, not every historical Coordinator row.
+        # College Coordinator and HOD hierarchy views represent
+        # current assignments, not every historical account row.
         #
         # Keep:
-        # - active Coordinator accounts
-        # - pending-activation Coordinator accounts
+        # - active accounts
+        # - pending-activation accounts
         #
         # Hide:
-        # - historical Coordinators explicitly removed by Admin
-        if normalized_role == ROLE_COLLEGE_COORDINATOR:
+        # - accounts explicitly removed/deactivated by Admin
+        if normalized_role in (
+            ROLE_COLLEGE_COORDINATOR,
+            ROLE_HOD,
+        ):
             stmt = stmt.where(
                 or_(
                     Faculty.is_active.is_(True),
