@@ -153,16 +153,6 @@ async def write_organization_settings(
     db: AsyncSession = Depends(get_db),
     current_admin: Admin = Depends(get_current_admin),
 ):
-    # Department mode must remain disabled during staged development.
-    if payload.department_architecture_enabled:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "Department architecture cannot be enabled "
-                "during the staged rollout"
-            ),
-        )
-
     return await update_organization_settings(
         db,
         payload,
