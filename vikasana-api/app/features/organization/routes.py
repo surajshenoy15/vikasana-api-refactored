@@ -31,6 +31,7 @@ from app.features.organization.service import (
     create_academic_batch,
     create_college,
     create_department,
+    delete_department,
     get_academic_batch,
     get_college,
     get_college_details,
@@ -264,6 +265,33 @@ async def edit_department(
         department_id,
         college,
         payload,
+    )
+
+
+@admin_router.delete(
+    "/departments/{department_id}",
+    response_model=DepartmentResponse,
+)
+async def remove_department(
+    department_id: int,
+    college: str = Query(
+        ...,
+        min_length=1,
+        max_length=200,
+    ),
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    """
+    Permanently delete an unused Department.
+
+    Departments referenced by Faculty, Students, or hierarchy
+    history are protected and must be deactivated instead.
+    """
+    return await delete_department(
+        db,
+        department_id,
+        college,
     )
 
 

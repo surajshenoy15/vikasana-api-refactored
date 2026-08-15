@@ -22,6 +22,8 @@ from app.features.organization.models import (
     CollegeAlias,
     CollegeOrganizationSetting,
     Department,
+    FacultyAccessHistory,
+    StudentAcademicHistory,
 )
 from app.features.organization.schemas import (
     AcademicBatchCreateRequest,
@@ -809,6 +811,126 @@ async def update_department(
     await db.refresh(department)
 
     return DepartmentResponse.model_validate(department)
+
+
+async def delete_department(
+    db: AsyncSession,
+    department_id: int,
+    college: str,
+) -> DepartmentResponse:
+    """
+    Permanently delete an unused Department master.
+
+    A Department that has ever been referenced by Faculty,
+    Students, Faculty access history, or Student academic
+    history cannot be deleted because doing so would weaken
+    the hierarchy/audit trail. Used departments must instead
+    be deactivated.
+    """
+    department = await _find_department(
+        db,
+        department_id,
+        college,
+    )
+
+    if department is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Department not found",
+        )
+
+    faculty_count_result = await db.execute(
+        select(func.count(Faculty.id)).where(
+            Faculty.department_id == department.id
+        )
+    )
+
+    faculty_count = int(
+        faculty_count_result.scalar() or 0
+    )
+
+    student_count_result = await db.execute(
+        select(func.count(Student.id)).where(
+            Student.department_id == department.id
+        )
+    )
+
+    student_count = int(
+        student_count_result.scalar() or 0
+    )
+
+    faculty_history_result = await db.execute(
+        select(
+            func.count(
+                FacultyAccessHistory.id
+            )
+        ).where(
+            FacultyAccessHistory.department_id
+            == department.id
+        )
+    )
+
+    faculty_history_count = int(
+        faculty_history_result.scalar() or 0
+    )
+
+    student_history_result = await db.execute(
+        select(
+            func.count(
+                StudentAcademicHistory.id
+            )
+        ).where(
+            (
+                StudentAcademicHistory.from_department_id
+                == department.id
+            )
+            |
+            (
+                StudentAcademicHistory.to_department_id
+                == department.id
+            )
+        )
+    )
+
+    student_history_count = int(
+        student_history_result.scalar() or 0
+    )
+
+    total_references = (
+        faculty_count
+        + student_count
+        + faculty_history_count
+        + student_history_count
+    )
+
+    if total_references > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Department cannot be deleted because it is in use. "
+                f"Faculty: {faculty_count}, "
+                f"Students: {student_count}, "
+                f"Faculty history: {faculty_history_count}, "
+                f"Student history: {student_history_count}. "
+                "Deactivate the department instead."
+            ),
+        )
+
+    response = DepartmentResponse.model_validate(
+        department
+    )
+
+    await db.delete(department)
+
+    await _commit_or_raise_conflict(
+        db,
+        (
+            "Department could not be deleted because "
+            "a protected relationship still exists"
+        ),
+    )
+
+    return response
 
 
 # --------------------------------------------------
