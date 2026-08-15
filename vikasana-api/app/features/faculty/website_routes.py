@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel, EmailStr
 
 from app.core.database import get_db
 from app.core.dependencies import (
@@ -36,7 +37,10 @@ from app.features.faculty.permission_service import (
 from app.features.students.schemas.student import (
     StudentOut,
 )
-from app.features.students.models import Student
+from app.features.students.models import (
+    Student,
+    StudentType,
+)
 from app.features.certificates.models import Certificate
 from app.features.organization.schemas import (
     DepartmentCreateRequest,
@@ -60,6 +64,18 @@ router = APIRouter(
     prefix="/website/faculty",
     tags=["Website - Faculty"],
 )
+
+
+class WebsiteMentorStudentUpdateRequest(BaseModel):
+    name: str | None = None
+    usn: str | None = None
+    email: EmailStr | None = None
+    branch: str | None = None
+    student_type: str | None = None
+
+    current_year: int | None = None
+    admitted_year: int | None = None
+    passout_year: int | None = None
 
 
 @router.get(
@@ -470,6 +486,226 @@ async def list_website_mentor_students(
     result = await db.execute(statement)
 
     return list(result.scalars().all())
+
+
+@router.patch(
+    "/mentors/{mentor_id}/students/{student_id}",
+    response_model=StudentOut,
+    summary="Update student under Faculty/Mentor",
+)
+async def update_website_mentor_student(
+    mentor_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    student_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    payload: WebsiteMentorStudentUpdateRequest = ...,
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> StudentOut:
+    """
+    Allow an authenticated HOD to edit student information only
+    when the Faculty/Mentor belongs directly to that HOD and the
+    student is assigned to that Faculty/Mentor.
+
+    College, department, batch, and Faculty/Mentor assignment
+    cannot be changed through this endpoint.
+    """
+
+    await _get_hod_owned_mentor(
+        db=db,
+        scope=scope,
+        mentor_id=mentor_id,
+    )
+
+    student = await get_student_within_website_scope(
+        db=db,
+        scope=scope,
+        student_id=student_id,
+    )
+
+    if student.assigned_faculty_id != mentor_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Student is not assigned to this "
+                "Faculty/Mentor"
+            ),
+        )
+
+    data = payload.model_dump(
+        exclude_unset=True,
+    )
+
+    if not data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No student fields provided for update",
+        )
+
+    if "name" in data:
+        name = str(
+            data["name"] or ""
+        ).strip()
+
+        if not name:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Student name is required",
+            )
+
+        data["name"] = name
+
+    if "usn" in data:
+        usn = str(
+            data["usn"] or ""
+        ).strip().upper()
+
+        if not usn:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="USN is required",
+            )
+
+        duplicate = await db.execute(
+            select(Student.id).where(
+                Student.college == student.college,
+                Student.usn == usn,
+                Student.id != student.id,
+            )
+        )
+
+        if duplicate.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="USN already exists",
+            )
+
+        data["usn"] = usn
+
+    if "email" in data and data["email"] is not None:
+        email = str(
+            data["email"]
+        ).strip().lower()
+
+        duplicate = await db.execute(
+            select(Student.id).where(
+                Student.college == student.college,
+                Student.email == email,
+                Student.id != student.id,
+            )
+        )
+
+        if duplicate.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Email already exists",
+            )
+
+        data["email"] = email
+
+    if "branch" in data:
+        branch = str(
+            data["branch"] or ""
+        ).strip()
+
+        if not branch:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Branch is required",
+            )
+
+        data["branch"] = branch
+
+    if "student_type" in data:
+        student_type = str(
+            data["student_type"] or ""
+        ).strip().upper()
+
+        if student_type not in (
+            StudentType.REGULAR.value,
+            StudentType.DIPLOMA.value,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "student_type must be "
+                    "REGULAR or DIPLOMA"
+                ),
+            )
+
+        data["student_type"] = student_type
+
+    if (
+        "current_year" in data
+        and data["current_year"] is not None
+        and not 1 <= data["current_year"] <= 8
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Current year must be between 1 and 8",
+        )
+
+    if (
+        "admitted_year" in data
+        and data["admitted_year"] is not None
+        and not 1990 <= data["admitted_year"] <= 2100
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Enter a valid admission year",
+        )
+
+    if (
+        "passout_year" in data
+        and data["passout_year"] is not None
+        and not 1990 <= data["passout_year"] <= 2100
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Enter a valid passout year",
+        )
+
+    final_admitted_year = data.get(
+        "admitted_year",
+        student.admitted_year,
+    )
+
+    final_passout_year = data.get(
+        "passout_year",
+        student.passout_year,
+    )
+
+    if (
+        final_admitted_year is not None
+        and final_passout_year is not None
+        and final_passout_year
+        < final_admitted_year
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Passout year cannot be before "
+                "admission year"
+            ),
+        )
+
+    for field_name, value in data.items():
+        setattr(
+            student,
+            field_name,
+            value,
+        )
+
+    await db.commit()
+    await db.refresh(student)
+
+    return student
 
 
 @router.delete(
