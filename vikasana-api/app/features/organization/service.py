@@ -337,24 +337,31 @@ async def update_college(
 
 
 
-async def archive_college(
+async def delete_college_master(
     db: AsyncSession,
     college_id: int,
     *,
-    archived_by_admin_id: int,
+    deleted_by_admin_id: int,
 ) -> CollegeResponse:
     """
-    Safely archive a College master record.
+    Permanently remove only the College master record.
 
-    This does NOT delete Faculty, Students, Departments, batches,
-    aliases, hierarchy history, or any historical operational data.
+    Historical hierarchy data is intentionally preserved:
+    - Faculty / HOD / College Coordinator
+    - Students
+    - Departments
+    - Academic batches
+    - hierarchy / access history
 
-    It:
-    1. Marks the College master inactive.
-    2. Deactivates college-wide SaaS access for the canonical name.
-    3. Deactivates access for active aliases.
-    4. Deactivates access for existing Faculty/Student college-name
-       variants that belong to the same canonical College.
+    College-specific current configuration and College aliases are
+    removed together with the College master record.
+
+    Before removing the master, access is disabled for the canonical
+    college name, active aliases, and existing Faculty/Student string
+    variants so legacy accounts cannot continue using the platform.
+
+    CollegeAlias rows are removed because they directly reference
+    colleges.id with ON DELETE RESTRICT.
     """
     college = await _find_college(
         db,
@@ -367,10 +374,13 @@ async def archive_college(
             detail="College not found",
         )
 
+    response = CollegeResponse.model_validate(
+        college
+    )
+
     alias_result = await db.execute(
         select(CollegeAlias.alias).where(
-            CollegeAlias.college_id == college.id,
-            CollegeAlias.is_active.is_(True),
+            CollegeAlias.college_id == college.id
         )
     )
 
@@ -430,8 +440,6 @@ async def archive_college(
             ]
         )
 
-    # Preserve exact historical string variants because the existing
-    # college-access dependency currently performs an exact match.
     deduplicated_access_names: list[str] = []
     seen_names: set[str] = set()
 
@@ -445,12 +453,11 @@ async def archive_college(
     now_utc = datetime.now(timezone.utc)
 
     reason = (
-        f"Archived by Admin ID {archived_by_admin_id} "
-        "via College management"
+        f"College master deleted by Admin ID "
+        f"{deleted_by_admin_id}"
     )
 
-    college.is_active = False
-
+    # Block access for every known exact college-name variant.
     for access_name in deduplicated_access_names:
         result = await db.execute(
             select(CollegeAccessControl).where(
@@ -474,14 +481,49 @@ async def archive_college(
             access_row.deactivated_at = now_utc
             access_row.updated_at = now_utc
 
-    await _commit_or_raise_conflict(
-        db,
-        "College archive could not be completed",
+    # Remove College-specific organization configuration.
+    # This is current configuration, not historical hierarchy data.
+    settings_result = await db.execute(
+        select(CollegeOrganizationSetting).where(
+            func.lower(
+                func.trim(
+                    CollegeOrganizationSetting.college
+                )
+            ).in_(normalized_scope_names)
+        )
     )
 
-    await db.refresh(college)
+    for settings_row in settings_result.scalars().all():
+        await db.delete(settings_row)
 
-    return CollegeResponse.model_validate(college)
+    # Remove aliases belonging directly to this College master.
+    alias_rows_result = await db.execute(
+        select(CollegeAlias).where(
+            CollegeAlias.college_id == college.id
+        )
+    )
+
+    for alias_row in alias_rows_result.scalars().all():
+        await db.delete(alias_row)
+
+    # Remove only the College master row.
+    # Faculty, Students, Departments, batches and history remain.
+    await db.delete(college)
+
+    try:
+        await db.commit()
+    except IntegrityError as error:
+        await db.rollback()
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "College could not be deleted because "
+                "a protected database relationship still exists"
+            ),
+        ) from error
+
+    return response
 
 
 

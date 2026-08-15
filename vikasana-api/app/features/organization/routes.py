@@ -27,7 +27,7 @@ from app.features.organization.schemas import (
     OrganizationSettingsUpdateRequest,
 )
 from app.features.organization.service import (
-    archive_college,
+    delete_college_master,
     create_academic_batch,
     create_college,
     create_department,
@@ -131,15 +131,13 @@ async def delete_college(
     current_admin: Admin = Depends(get_current_admin),
 ):
     """
-    Safe College archive.
-
-    This endpoint does not hard-delete the College or any linked
-    hierarchy/history data.
+    Delete the College master record while preserving linked
+    historical hierarchy and operational records.
     """
-    return await archive_college(
+    return await delete_college_master(
         db,
         college_id,
-        archived_by_admin_id=current_admin.id,
+        deleted_by_admin_id=current_admin.id,
     )
 
 
