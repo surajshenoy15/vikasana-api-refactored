@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -8,6 +8,7 @@ from app.core.dependencies import (
 )
 from app.features.faculty.permission_scope import (
     WebsiteFacultyScope,
+    apply_student_scope_to_statement,
 )
 from app.features.faculty.models import Faculty
 from app.features.faculty.role_policy import (
@@ -35,6 +36,8 @@ from app.features.faculty.permission_service import (
 from app.features.students.schemas.student import (
     StudentOut,
 )
+from app.features.students.models import Student
+from app.features.certificates.models import Certificate
 from app.features.organization.schemas import (
     DepartmentCreateRequest,
     DepartmentResponse,
@@ -369,6 +372,189 @@ async def create_website_faculty_mentor(
         activation_email_sent=email_sent,
         message=message,
     )
+
+
+
+# ------------------------------------------------------------
+# HOD -> FACULTY/MENTOR -> STUDENTS
+# ------------------------------------------------------------
+
+
+async def _get_hod_owned_mentor(
+    *,
+    db: AsyncSession,
+    scope: WebsiteFacultyScope,
+    mentor_id: int,
+) -> Faculty:
+    """
+    Resolve a Faculty/Mentor only when it belongs directly to the
+    authenticated HOD in the same college and department.
+    """
+
+    if scope.role != ROLE_HOD:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only an HOD can manage "
+                "Faculty/Mentor students"
+            ),
+        )
+
+    if scope.department_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="HOD department is not assigned",
+        )
+
+    result = await db.execute(
+        select(Faculty).where(
+            Faculty.id == mentor_id,
+            Faculty.college == scope.college,
+            Faculty.department_id == scope.department_id,
+            Faculty.role == ROLE_FACULTY,
+            Faculty.parent_faculty_id == scope.faculty_id,
+        )
+    )
+
+    mentor = result.scalar_one_or_none()
+
+    if mentor is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Faculty/Mentor not found",
+        )
+
+    return mentor
+
+
+@router.get(
+    "/mentors/{mentor_id}/students",
+    response_model=list[StudentOut],
+    summary="List students assigned to Faculty/Mentor",
+)
+async def list_website_mentor_students(
+    mentor_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> list[StudentOut]:
+    """
+    List students assigned to one Faculty/Mentor directly under
+    the authenticated HOD.
+    """
+
+    await _get_hod_owned_mentor(
+        db=db,
+        scope=scope,
+        mentor_id=mentor_id,
+    )
+
+    statement = select(Student).where(
+        Student.assigned_faculty_id == mentor_id
+    )
+
+    statement = apply_student_scope_to_statement(
+        statement,
+        scope,
+    )
+
+    statement = statement.order_by(
+        Student.name.asc(),
+        Student.id.asc(),
+    )
+
+    result = await db.execute(statement)
+
+    return list(result.scalars().all())
+
+
+@router.delete(
+    "/mentors/{mentor_id}/students/{student_id}",
+    summary="Permanently delete student under Faculty/Mentor",
+)
+async def delete_website_mentor_student(
+    mentor_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    student_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+):
+    """
+    Permanently delete a student assigned to a Faculty/Mentor
+    directly under the authenticated HOD.
+
+    This is a hard delete, not an unassign operation.
+    """
+
+    await _get_hod_owned_mentor(
+        db=db,
+        scope=scope,
+        mentor_id=mentor_id,
+    )
+
+    student = await get_student_within_website_scope(
+        db=db,
+        scope=scope,
+        student_id=student_id,
+    )
+
+    if student.assigned_faculty_id != mentor_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Student is not assigned to this "
+                "Faculty/Mentor"
+            ),
+        )
+
+    try:
+        # Certificates do not currently use ON DELETE CASCADE.
+        await db.execute(
+            delete(Certificate).where(
+                Certificate.student_id == student_id
+            )
+        )
+
+        # Other student-linked hierarchy/activity/face records
+        # use database ON DELETE CASCADE.
+        await db.execute(
+            delete(Student).where(
+                Student.id == student_id
+            )
+        )
+
+        await db.commit()
+
+        return {
+            "success": True,
+            "message": (
+                "Student permanently deleted successfully"
+            ),
+            "student_id": student_id,
+            "mentor_id": mentor_id,
+        }
+
+    except Exception as error:
+        await db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "Failed to delete student permanently: "
+                f"{str(error)}"
+            ),
+        )
 
 
 @router.get(
