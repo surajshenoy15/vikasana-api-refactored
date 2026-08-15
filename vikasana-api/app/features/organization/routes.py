@@ -27,6 +27,7 @@ from app.features.organization.schemas import (
     OrganizationSettingsUpdateRequest,
 )
 from app.features.organization.service import (
+    archive_college,
     create_academic_batch,
     create_college,
     create_department,
@@ -117,6 +118,28 @@ async def edit_college(
         db,
         college_id,
         payload,
+    )
+
+
+@admin_router.delete(
+    "/colleges/{college_id}",
+    response_model=CollegeResponse,
+)
+async def delete_college(
+    college_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    """
+    Safe College archive.
+
+    This endpoint does not hard-delete the College or any linked
+    hierarchy/history data.
+    """
+    return await archive_college(
+        db,
+        college_id,
+        archived_by_admin_id=current_admin.id,
     )
 
 

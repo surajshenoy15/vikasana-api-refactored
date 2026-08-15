@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.features.college_access.models import CollegeAccessControl
 from app.features.faculty.models import Faculty
 from app.features.faculty.role_policy import (
     ROLE_COLLEGE_COORDINATOR,
@@ -331,6 +334,155 @@ async def update_college(
     await db.refresh(college)
 
     return CollegeResponse.model_validate(college)
+
+
+
+async def archive_college(
+    db: AsyncSession,
+    college_id: int,
+    *,
+    archived_by_admin_id: int,
+) -> CollegeResponse:
+    """
+    Safely archive a College master record.
+
+    This does NOT delete Faculty, Students, Departments, batches,
+    aliases, hierarchy history, or any historical operational data.
+
+    It:
+    1. Marks the College master inactive.
+    2. Deactivates college-wide SaaS access for the canonical name.
+    3. Deactivates access for active aliases.
+    4. Deactivates access for existing Faculty/Student college-name
+       variants that belong to the same canonical College.
+    """
+    college = await _find_college(
+        db,
+        college_id,
+    )
+
+    if college is None:
+        raise HTTPException(
+            status_code=404,
+            detail="College not found",
+        )
+
+    alias_result = await db.execute(
+        select(CollegeAlias.alias).where(
+            CollegeAlias.college_id == college.id,
+            CollegeAlias.is_active.is_(True),
+        )
+    )
+
+    aliases = alias_result.scalars().all()
+
+    canonical_scope_names = [
+        college.name,
+        *aliases,
+    ]
+
+    normalized_scope_names = [
+        (name or "").strip().lower()
+        for name in canonical_scope_names
+        if (name or "").strip()
+    ]
+
+    access_names: list[str] = [
+        (name or "").strip()
+        for name in canonical_scope_names
+        if (name or "").strip()
+    ]
+
+    if normalized_scope_names:
+        faculty_variants_result = await db.execute(
+            select(Faculty.college)
+            .distinct()
+            .where(
+                func.lower(
+                    func.trim(Faculty.college)
+                ).in_(normalized_scope_names)
+            )
+        )
+
+        student_variants_result = await db.execute(
+            select(Student.college)
+            .distinct()
+            .where(
+                func.lower(
+                    func.trim(Student.college)
+                ).in_(normalized_scope_names)
+            )
+        )
+
+        access_names.extend(
+            [
+                (name or "").strip()
+                for name in faculty_variants_result.scalars().all()
+                if (name or "").strip()
+            ]
+        )
+
+        access_names.extend(
+            [
+                (name or "").strip()
+                for name in student_variants_result.scalars().all()
+                if (name or "").strip()
+            ]
+        )
+
+    # Preserve exact historical string variants because the existing
+    # college-access dependency currently performs an exact match.
+    deduplicated_access_names: list[str] = []
+    seen_names: set[str] = set()
+
+    for name in access_names:
+        if name in seen_names:
+            continue
+
+        seen_names.add(name)
+        deduplicated_access_names.append(name)
+
+    now_utc = datetime.now(timezone.utc)
+
+    reason = (
+        f"Archived by Admin ID {archived_by_admin_id} "
+        "via College management"
+    )
+
+    college.is_active = False
+
+    for access_name in deduplicated_access_names:
+        result = await db.execute(
+            select(CollegeAccessControl).where(
+                CollegeAccessControl.college == access_name
+            )
+        )
+
+        access_row = result.scalar_one_or_none()
+
+        if access_row is None:
+            access_row = CollegeAccessControl(
+                college=access_name,
+                is_active=False,
+                reason=reason,
+                deactivated_at=now_utc,
+            )
+            db.add(access_row)
+        else:
+            access_row.is_active = False
+            access_row.reason = reason
+            access_row.deactivated_at = now_utc
+            access_row.updated_at = now_utc
+
+    await _commit_or_raise_conflict(
+        db,
+        "College archive could not be completed",
+    )
+
+    await db.refresh(college)
+
+    return CollegeResponse.model_validate(college)
+
 
 
 # --------------------------------------------------
