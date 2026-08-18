@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, EmailStr
 
@@ -11,7 +11,10 @@ from app.features.faculty.permission_scope import (
     WebsiteFacultyScope,
     apply_student_scope_to_statement,
 )
-from app.features.faculty.models import Faculty
+from app.features.faculty.models import (
+    Faculty,
+    FacultyActivationSession,
+)
 from app.features.faculty.role_policy import (
     ROLE_COLLEGE_COORDINATOR,
     ROLE_FACULTY,
@@ -28,6 +31,7 @@ from app.features.faculty.schemas.website_hierarchy import (
     WebsiteHODCreateRequest,
 )
 from app.features.faculty.service import (
+    add_faculty_access_history,
     create_faculty,
 )
 from app.features.faculty.permission_service import (
@@ -44,6 +48,7 @@ from app.features.students.models import (
 from app.features.certificates.models import Certificate
 from app.features.organization.models import (
     Department,
+    FacultyAccessHistory,
 )
 from app.features.organization.schemas import (
     DepartmentCreateRequest,
@@ -67,6 +72,35 @@ router = APIRouter(
     prefix="/website/faculty",
     tags=["Website - Faculty"],
 )
+
+
+
+def _not_explicitly_removed_faculty():
+    """
+    Keep active and pending accounts visible while hiding accounts
+    explicitly removed through an immutable deactivation history row.
+    """
+
+    has_deactivation_history = (
+        select(
+            FacultyAccessHistory.id
+        )
+        .where(
+            FacultyAccessHistory.faculty_id
+            == Faculty.id,
+            FacultyAccessHistory.action
+            == "deactivated",
+        )
+        .exists()
+    )
+
+    return not_(
+        and_(
+            Faculty.is_active.is_(False),
+            Faculty.activation_token_hash.is_(None),
+            has_deactivation_history,
+        )
+    )
 
 
 class WebsiteMentorStudentUpdateRequest(BaseModel):
@@ -274,6 +308,7 @@ async def list_website_department_hods(
             Faculty.role == ROLE_HOD,
             Faculty.parent_faculty_id
             == scope.faculty_id,
+            _not_explicitly_removed_faculty(),
         )
         .order_by(
             Faculty.created_at.desc()
@@ -432,6 +467,7 @@ async def list_website_hods(
             Faculty.college == scope.college,
             Faculty.role == ROLE_HOD,
             Faculty.parent_faculty_id == scope.faculty_id,
+            _not_explicitly_removed_faculty(),
         )
         .order_by(Faculty.created_at.desc())
     )
@@ -511,6 +547,139 @@ async def create_website_hod(
         activation_email_sent=email_sent,
         message=message,
     )
+
+
+
+@router.delete(
+    "/hods/{hod_id}",
+    summary="Remove HOD under College Coordinator",
+)
+async def remove_website_hod(
+    hod_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+):
+    """
+    Non-destructively remove an HOD directly owned by the
+    authenticated College Coordinator.
+
+    Historical Faculty, hierarchy and provenance rows are preserved.
+    """
+
+    if scope.role != ROLE_COLLEGE_COORDINATOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only a College Coordinator can remove "
+                "an HOD"
+            ),
+        )
+
+    result = await db.execute(
+        select(Faculty).where(
+            Faculty.id == hod_id,
+            Faculty.college == scope.college,
+            Faculty.role == ROLE_HOD,
+            Faculty.parent_faculty_id
+            == scope.faculty_id,
+        )
+    )
+
+    hod = result.scalar_one_or_none()
+
+    if hod is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="HOD not found",
+        )
+
+    previous_deactivation = await db.scalar(
+        select(
+            FacultyAccessHistory.id
+        )
+        .where(
+            FacultyAccessHistory.faculty_id
+            == hod.id,
+            FacultyAccessHistory.action
+            == "deactivated",
+        )
+        .order_by(
+            FacultyAccessHistory.created_at.desc(),
+            FacultyAccessHistory.id.desc(),
+        )
+        .limit(1)
+    )
+
+    already_removed = (
+        hod.is_active is False
+        and hod.activation_token_hash is None
+        and previous_deactivation is not None
+    )
+
+    if already_removed:
+        return {
+            "success": True,
+            "message": "HOD is already removed",
+            "hod_id": hod.id,
+            "is_active": False,
+            "activation_revoked": True,
+        }
+
+    hod.is_active = False
+    hod.activation_token_hash = None
+    hod.activation_expires_at = None
+
+    await db.execute(
+        delete(
+            FacultyActivationSession
+        ).where(
+            FacultyActivationSession.faculty_id
+            == hod.id
+        )
+    )
+
+    await add_faculty_access_history(
+        db=db,
+        faculty_id=hod.id,
+        action="deactivated",
+        college=hod.college,
+        previous_role=hod.role,
+        new_role=hod.role,
+        previous_parent_faculty_id=(
+            hod.parent_faculty_id
+        ),
+        new_parent_faculty_id=(
+            hod.parent_faculty_id
+        ),
+        department_id=hod.department_id,
+        changed_by_faculty_id=(
+            scope.faculty_id
+        ),
+        note=(
+            "HOD access removed by College Coordinator; "
+            "historical hierarchy and provenance preserved"
+        ),
+    )
+
+    try:
+        await db.commit()
+        await db.refresh(hod)
+    except Exception:
+        await db.rollback()
+        raise
+
+    return {
+        "success": True,
+        "message": "HOD removed successfully",
+        "hod_id": hod.id,
+        "is_active": hod.is_active,
+        "activation_revoked": True,
+    }
 
 
 @router.get(
