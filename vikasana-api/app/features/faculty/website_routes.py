@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, EmailStr
 
@@ -42,6 +42,9 @@ from app.features.students.models import (
     StudentType,
 )
 from app.features.certificates.models import Certificate
+from app.features.organization.models import (
+    Department,
+)
 from app.features.organization.schemas import (
     DepartmentCreateRequest,
     DepartmentResponse,
@@ -151,6 +154,247 @@ async def create_website_department(
         db,
         create_payload,
         created_by_faculty_id=scope.faculty_id,
+    )
+
+
+
+# ------------------------------------------------------------
+# COLLEGE COORDINATOR -> DEPARTMENT DRILL-DOWN
+# ------------------------------------------------------------
+
+
+async def _get_coordinator_department(
+    *,
+    db: AsyncSession,
+    scope: WebsiteFacultyScope,
+    department_id: int,
+) -> Department:
+    """
+    Resolve one active department only when it belongs to the
+    authenticated College Coordinator's college.
+
+    This helper is read-only.
+    """
+
+    if scope.role != ROLE_COLLEGE_COORDINATOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only a College Coordinator can access "
+                "department drill-down details"
+            ),
+        )
+
+    result = await db.execute(
+        select(Department).where(
+            Department.id == department_id,
+            func.lower(
+                func.trim(Department.college)
+            )
+            == scope.college.strip().casefold(),
+            Department.is_active.is_(True),
+        )
+    )
+
+    department = result.scalar_one_or_none()
+
+    if department is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Department not found",
+        )
+
+    return department
+
+
+@router.get(
+    "/departments/{department_id}",
+    response_model=DepartmentResponse,
+    summary="Get department details for College Coordinator",
+)
+async def get_website_department_details(
+    department_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> DepartmentResponse:
+    """
+    Return one active department within the authenticated
+    College Coordinator's college.
+    """
+
+    department = await _get_coordinator_department(
+        db=db,
+        scope=scope,
+        department_id=department_id,
+    )
+
+    return DepartmentResponse.model_validate(
+        department
+    )
+
+
+@router.get(
+    "/departments/{department_id}/hods",
+    response_model=list[FacultyResponse],
+    summary="List department HODs for College Coordinator",
+)
+async def list_website_department_hods(
+    department_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> list[FacultyResponse]:
+    """
+    Read-only department HOD listing.
+
+    HOD hierarchy remains scoped to the authenticated
+    College Coordinator through parent_faculty_id.
+    """
+
+    department = await _get_coordinator_department(
+        db=db,
+        scope=scope,
+        department_id=department_id,
+    )
+
+    result = await db.execute(
+        select(Faculty)
+        .where(
+            Faculty.college == scope.college,
+            Faculty.department_id == department.id,
+            Faculty.role == ROLE_HOD,
+            Faculty.parent_faculty_id
+            == scope.faculty_id,
+        )
+        .order_by(
+            Faculty.created_at.desc()
+        )
+    )
+
+    return [
+        FacultyResponse.model_validate(item)
+        for item in result.scalars().all()
+    ]
+
+
+@router.get(
+    "/departments/{department_id}/mentors",
+    response_model=list[FacultyResponse],
+    summary=(
+        "List department Faculty/Mentors "
+        "for College Coordinator"
+    ),
+)
+async def list_website_department_mentors(
+    department_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> list[FacultyResponse]:
+    """
+    Read-only Faculty/Mentor listing for a selected department.
+
+    College Coordinator receives no Faculty/Mentor write capability
+    through this endpoint.
+    """
+
+    department = await _get_coordinator_department(
+        db=db,
+        scope=scope,
+        department_id=department_id,
+    )
+
+    result = await db.execute(
+        select(Faculty)
+        .where(
+            Faculty.college == scope.college,
+            Faculty.department_id == department.id,
+            Faculty.role == ROLE_FACULTY,
+        )
+        .order_by(
+            Faculty.full_name.asc(),
+            Faculty.id.asc(),
+        )
+    )
+
+    return [
+        FacultyResponse.model_validate(item)
+        for item in result.scalars().all()
+    ]
+
+
+@router.get(
+    "/departments/{department_id}/students",
+    response_model=list[StudentOut],
+    summary=(
+        "List department students "
+        "for College Coordinator"
+    ),
+)
+async def list_website_department_students(
+    department_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    offset: int = Query(
+        default=0,
+        ge=0,
+    ),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+    ),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> list[StudentOut]:
+    """
+    Read-only students for one selected department.
+
+    Filtering happens server-side so large colleges are not loaded
+    into the browser before department filtering.
+    """
+
+    department = await _get_coordinator_department(
+        db=db,
+        scope=scope,
+        department_id=department_id,
+    )
+
+    result = await db.execute(
+        select(Student)
+        .where(
+            func.lower(
+                func.trim(Student.college)
+            )
+            == scope.college.strip().casefold(),
+            Student.department_id
+            == department.id,
+        )
+        .order_by(
+            Student.id.asc()
+        )
+        .offset(offset)
+        .limit(limit)
+    )
+
+    return list(
+        result.scalars().all()
     )
 
 
