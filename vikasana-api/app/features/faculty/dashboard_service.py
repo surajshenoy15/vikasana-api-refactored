@@ -15,6 +15,7 @@ from app.features.faculty.permission_scope import (
 from app.features.faculty.schemas.website_dashboard import (
     WebsiteFacultyDashboardStatsOut,
 )
+from app.features.organization.models import Department
 from app.features.students.models import Student
 
 
@@ -99,6 +100,35 @@ async def get_website_faculty_dashboard_stats(
     contain college or department fields.
     """
     visible_event_conditions = _event_visible_conditions()
+
+    # Resolve display metadata from the authenticated server-side
+    # scope rather than trusting client-supplied profile data.
+    faculty_name = await db.scalar(
+        select(Faculty.full_name).where(
+            Faculty.id == scope.faculty_id
+        )
+    )
+
+    department_name = None
+    department_code = None
+
+    if scope.scope_type == FacultyScopeType.DEPARTMENT:
+        department_result = await db.execute(
+            select(
+                Department.name,
+                Department.code,
+            ).where(
+                Department.id == scope.department_id,
+                func.lower(func.trim(Department.college))
+                == scope.college.strip().casefold(),
+            )
+        )
+
+        department_row = department_result.first()
+
+        if department_row:
+            department_name = department_row.name
+            department_code = department_row.code
 
     total_students_statement = apply_student_scope_to_statement(
         select(func.count(Student.id)).select_from(Student),
@@ -215,5 +245,13 @@ async def get_website_faculty_dashboard_stats(
         totalActivities=total_activities,
         approvedActivities=approved_activities,
         totalCertificates=total_certificates,
+        facultyName=faculty_name,
+        departmentId=(
+            scope.department_id
+            if scope.scope_type == FacultyScopeType.DEPARTMENT
+            else None
+        ),
+        departmentName=department_name,
+        departmentCode=department_code,
         asOf=None,
     )

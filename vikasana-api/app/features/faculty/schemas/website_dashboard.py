@@ -22,4 +22,10 @@ class WebsiteFacultyDashboardStatsOut(BaseModel):
 
     totalCertificates: int = Field(ge=0)
 
+    # Authenticated website Faculty identity / management scope.
+    facultyName: str | None = None
+    departmentId: int | None = Field(default=None, ge=1)
+    departmentName: str | None = None
+    departmentCode: str | None = None
+
     asOf: datetime | None = None
