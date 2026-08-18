@@ -47,6 +47,7 @@ from app.features.organization.models import (  # noqa: F401
     StudentFacultyAssignment,
 )
 from app.features.face.models import StudentFaceEmbedding  # noqa: F401
+from app.features.audit.models import AuditLog  # noqa: F401
 
 
 config = context.config

@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from jose import JWTError
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -13,6 +14,10 @@ from app.features.auth.schemas.student_auth import (
     StudentRequestOtp,
     StudentVerifyOtp,
 )
+from app.features.audit.service import append_audit_log
+from app.features.students.models import Student
+from app.features.organization.models import Department
+
 from app.features.auth.student_auth_service import (
     request_student_otp,
     verify_student_otp_and_issue_token,
@@ -45,6 +50,7 @@ async def request_otp(
     response_model=StudentLoginResponse,
 )
 async def verify_otp(
+    request: Request,
     payload: StudentVerifyOtp,
     db: AsyncSession = Depends(get_db),
 ):
@@ -53,6 +59,56 @@ async def verify_otp(
         email=str(payload.email),
         otp=payload.otp,
     )
+
+    normalized_email = (
+        str(payload.email)
+        .strip()
+        .lower()
+    )
+
+    student_result = await db.execute(
+        select(Student).where(
+            func.lower(Student.email)
+            == normalized_email
+        )
+    )
+
+    student = student_result.scalar_one_or_none()
+
+    if student is not None:
+        department_name = None
+
+        if student.department_id is not None:
+            department = await db.get(
+                Department,
+                student.department_id,
+            )
+
+            if department is not None:
+                department_name = department.name
+
+        await append_audit_log(
+            db,
+            actor_type="STUDENT",
+            actor_id=student.id,
+            actor_role="student",
+            actor_name=student.name,
+            actor_identifier=student.usn,
+            actor_email=student.email,
+            college=student.college,
+            department_id=student.department_id,
+            department_name=department_name,
+            action="LOGIN_SUCCESS",
+            description=(
+                f"{student.name} logged in successfully."
+            ),
+            entity_type="authentication",
+            source="mobile_app",
+            request=request,
+            metadata={
+                "auth_method": "otp",
+            },
+        )
 
     return StudentLoginResponse(
         access_token=tokens["access_token"],

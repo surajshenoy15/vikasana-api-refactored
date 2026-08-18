@@ -6,7 +6,7 @@ import math
 from datetime import datetime, date as date_type, time as time_type, timezone
 from typing import List
 
-from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
+from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form, Request
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.features.events.role_guard import validate_event_role_access, can_student_view_event
@@ -19,6 +19,8 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import selectinload
 from app.features.students.models import Student
+from app.features.organization.models import Department
+from app.features.audit.service import append_audit_log
 
 from app.features.events.models import (
     Event,
@@ -685,6 +687,7 @@ async def student_event_certificates(
 @router.post("/student/events/{event_id}/register", response_model=RegisterOut)
 async def register_event(
     event_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
@@ -694,7 +697,74 @@ async def register_event(
         event_id=event_id,
     )
 
-    return await register_for_event(db, student.id, event_id)
+    result = await register_for_event(
+        db,
+        student.id,
+        event_id,
+    )
+
+    # Log participation start only when this request actually
+    # created the EventSubmission. Repeated Register requests
+    # for the same event must not create duplicate audit rows.
+    if bool(result.get("created")):
+        event = await db.get(
+            Event,
+            event_id,
+        )
+
+        department_name = None
+
+        if student.department_id is not None:
+            department = await db.get(
+                Department,
+                student.department_id,
+            )
+
+            if department is not None:
+                department_name = department.name
+
+        await append_audit_log(
+            db,
+            actor_type="STUDENT",
+            actor_id=student.id,
+            actor_role="student",
+            actor_name=student.name,
+            actor_identifier=student.usn,
+            actor_email=student.email,
+            college=student.college,
+            department_id=student.department_id,
+            department_name=department_name,
+            action="EVENT_PARTICIPATION_STARTED",
+            description=(
+                f"{student.name} started participation in "
+                f"{event.title if event else f'event #{event_id}'}."
+            ),
+            entity_type="event_submission",
+            entity_id=result["submission_id"],
+            source="mobile_app",
+            request=request,
+            metadata={
+                "event_id": event_id,
+                "event_title": (
+                    event.title
+                    if event is not None
+                    else None
+                ),
+                "event_role": (
+                    getattr(event, "event_role", None)
+                    if event is not None
+                    else None
+                ),
+                "submission_id": result["submission_id"],
+                "submission_status": result["status"],
+            },
+        )
+
+    # Preserve the existing public RegisterOut response shape.
+    return {
+        "submission_id": result["submission_id"],
+        "status": result["status"],
+    }
 
 
 @router.get("/student/events/{event_id}/draft")
@@ -927,6 +997,7 @@ async def upload_photos(
 async def submit_event(
     submission_id: int,
     payload: FinalSubmitIn,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
@@ -939,7 +1010,10 @@ async def submit_event(
     sub = sub_res.scalar_one_or_none()
 
     if not sub:
-        raise HTTPException(status_code=404, detail="Submission not found for this student")
+        raise HTTPException(
+            status_code=404,
+            detail="Submission not found for this student",
+        )
 
     await validate_event_role_access(
         db=db,
@@ -947,7 +1021,102 @@ async def submit_event(
         event_id=sub.event_id,
     )
 
-    return await final_submit(db, submission_id, student.id, payload.description)
+    event_id = sub.event_id
+
+    submission = await final_submit(
+        db,
+        submission_id,
+        student.id,
+        payload.description,
+    )
+
+    event = await db.get(
+        Event,
+        event_id,
+    )
+
+    department_name = None
+
+    if student.department_id is not None:
+        department = await db.get(
+            Department,
+            student.department_id,
+        )
+
+        if department is not None:
+            department_name = department.name
+
+    final_status = str(
+        getattr(submission, "status", "")
+        or ""
+    )
+
+    await append_audit_log(
+        db,
+        actor_type="STUDENT",
+        actor_id=student.id,
+        actor_role="student",
+        actor_name=student.name,
+        actor_identifier=student.usn,
+        actor_email=student.email,
+        college=student.college,
+        department_id=student.department_id,
+        department_name=department_name,
+        action="EVENT_PARTICIPATION_SUBMITTED",
+        description=(
+            f"{student.name} submitted participation for "
+            f"{event.title if event else f'event #{event_id}'}."
+        ),
+        entity_type="event_submission",
+        entity_id=submission_id,
+        source="mobile_app",
+        request=request,
+        metadata={
+            "event_id": event_id,
+            "event_title": (
+                event.title
+                if event is not None
+                else None
+            ),
+            "event_role": (
+                getattr(event, "event_role", None)
+                if event is not None
+                else None
+            ),
+            "submission_id": submission_id,
+            "submission_status": final_status,
+            "auto_approved": (
+                final_status.lower()
+                == "approved"
+            ),
+            "submitted_at": (
+                submission.submitted_at.isoformat()
+                if getattr(
+                    submission,
+                    "submitted_at",
+                    None,
+                )
+                else None
+            ),
+        },
+    )
+
+    # Reload after audit commit so response serialization receives
+    # a fresh submission row.
+    refreshed = await db.execute(
+        select(EventSubmission)
+        .options(
+            selectinload(
+                EventSubmission.photos
+            )
+        )
+        .where(
+            EventSubmission.id
+            == submission_id
+        )
+    )
+
+    return refreshed.scalar_one()
 
 
 # ---------------------- ADMIN REVIEW ----------------------

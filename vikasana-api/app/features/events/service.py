@@ -2590,7 +2590,11 @@ async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
     )
     existing = q.scalar_one_or_none()
     if existing:
-        return {"submission_id": existing.id, "status": existing.status}
+        return {
+            "submission_id": existing.id,
+            "status": existing.status,
+            "created": False,
+        }
 
     submission = EventSubmission(
         event_id=event_id,
@@ -2601,7 +2605,11 @@ async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
     await db.commit()
     await db.refresh(submission)
 
-    return {"submission_id": submission.id, "status": submission.status}
+    return {
+        "submission_id": submission.id,
+        "status": submission.status,
+        "created": True,
+    }
 
 
 async def add_photo(

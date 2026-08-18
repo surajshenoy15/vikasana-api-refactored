@@ -310,6 +310,18 @@ app.include_router(
 )
 
 
+# ── Immutable Audit Logs ──
+
+from app.features.audit.routes import (
+    router as admin_audit_router,
+)
+
+app.include_router(
+    admin_audit_router,
+    prefix="/api",
+)
+
+
 # ── Dashboard ──
 
 from app.features.dashboard.routes import (
