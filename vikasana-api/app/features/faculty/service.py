@@ -738,6 +738,259 @@ async def reuse_inactive_college_coordinator(
     return existing, email_sent
 
 
+
+async def reuse_inactive_hod(
+    payload: FacultyCreateRequest,
+    db: AsyncSession,
+    *,
+    parent_faculty_id: int | None = None,
+    created_by_faculty_id: int | None = None,
+) -> tuple[Faculty, bool] | None:
+    """
+    Reuse a previously removed HOD account when a College Coordinator
+    assigns the same email again.
+
+    Safety:
+    - never creates a duplicate Faculty row,
+    - only reuses an explicitly deactivated historical HOD,
+    - never reuses an account across colleges,
+    - preserves the original Faculty ID and creator provenance,
+    - restores the current parent/department hierarchy,
+    - records a new immutable access-history entry.
+    """
+
+    if (
+        str(payload.role or "").strip().casefold() != "hod"
+        or created_by_faculty_id is None
+        or parent_faculty_id is None
+    ):
+        return None
+
+    normalized_email = (
+        str(payload.email)
+        .strip()
+        .casefold()
+    )
+
+    existing_result = await db.execute(
+        select(Faculty).where(
+            func.lower(
+                func.trim(Faculty.email)
+            ) == normalized_email
+        )
+    )
+
+    existing = (
+        existing_result.scalar_one_or_none()
+    )
+
+    if existing is None:
+        return None
+
+    existing_role = (
+        str(existing.role or "")
+        .strip()
+        .casefold()
+    )
+
+    # An email belonging to a different role remains a hard duplicate.
+    if existing_role != "hod":
+        return None
+
+    # Pending or currently active HOD accounts are still live
+    # assignments and must not be silently reused.
+    if (
+        existing.is_active
+        or existing.activation_token_hash is not None
+    ):
+        return None
+
+    # Only accounts explicitly removed through access-history
+    # are eligible for restoration.
+    deactivation_history_id = await db.scalar(
+        select(
+            FacultyAccessHistory.id
+        )
+        .where(
+            FacultyAccessHistory.faculty_id
+            == existing.id,
+            FacultyAccessHistory.action
+            == "deactivated",
+        )
+        .order_by(
+            FacultyAccessHistory.created_at.desc(),
+            FacultyAccessHistory.id.desc(),
+        )
+        .limit(1)
+    )
+
+    if deactivation_history_id is None:
+        return None
+
+    requested_scope = await _faculty_college_scope_keys(
+        db,
+        payload.college,
+    )
+
+    existing_college_key = (
+        str(existing.college or "")
+        .strip()
+        .casefold()
+    )
+
+    # Never reuse an HOD across colleges.
+    if existing_college_key not in requested_scope:
+        return None
+
+    if payload.department_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="HOD department is required",
+        )
+
+    department_result = await db.execute(
+        select(Department).where(
+            Department.id == payload.department_id,
+            Department.is_active.is_(True),
+            func.lower(
+                func.trim(Department.college)
+            ).in_(
+                list(requested_scope)
+            ),
+        )
+    )
+
+    department = (
+        department_result.scalar_one_or_none()
+    )
+
+    if department is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Department must be active and belong "
+                "to the same college as the HOD"
+            ),
+        )
+
+    previous_role = existing.role
+    previous_parent_faculty_id = (
+        existing.parent_faculty_id
+    )
+    previous_department_id = (
+        existing.department_id
+    )
+
+    existing.full_name = (
+        payload.full_name.strip()
+    )
+
+    existing.role = "hod"
+    existing.department_id = (
+        payload.department_id
+    )
+    existing.parent_faculty_id = (
+        parent_faculty_id
+    )
+
+    # Preserve created_by_faculty_id. It identifies the original
+    # creator; the new actor is captured in FacultyAccessHistory.
+
+    await db.execute(
+        delete(
+            FacultyActivationSession
+        ).where(
+            FacultyActivationSession.faculty_id
+            == existing.id
+        )
+    )
+
+    token = None
+
+    if existing.password_hash:
+        # Previously activated account: restore access using the
+        # existing password.
+        existing.is_active = True
+        existing.activation_token_hash = None
+        existing.activation_expires_at = None
+
+        history_action = "reactivated"
+        history_note = (
+            "Existing HOD account reassigned and reactivated "
+            "by College Coordinator"
+        )
+
+    else:
+        # Never-activated historical account: generate a fresh
+        # activation invitation.
+        token = create_activation_token(
+            existing.email
+        )
+
+        existing.is_active = False
+        existing.activation_token_hash = (
+            hash_token(token)
+        )
+        existing.activation_expires_at = (
+            activation_expiry_dt()
+        )
+
+        history_action = "reinvited"
+        history_note = (
+            "Existing HOD account reassigned with a fresh "
+            "activation invitation by College Coordinator"
+        )
+
+    if (
+        previous_department_id
+        != existing.department_id
+    ):
+        history_note += (
+            f"; department changed from "
+            f"{previous_department_id} to "
+            f"{existing.department_id}"
+        )
+
+    await add_faculty_access_history(
+        db=db,
+        faculty_id=existing.id,
+        action=history_action,
+        college=existing.college,
+        previous_role=previous_role,
+        new_role=existing.role,
+        previous_parent_faculty_id=(
+            previous_parent_faculty_id
+        ),
+        new_parent_faculty_id=(
+            existing.parent_faculty_id
+        ),
+        department_id=(
+            existing.department_id
+        ),
+        changed_by_faculty_id=(
+            created_by_faculty_id
+        ),
+        note=history_note,
+    )
+
+    try:
+        await db.commit()
+        await db.refresh(existing)
+    except Exception:
+        await db.rollback()
+        raise
+
+    email_sent = False
+
+    if token is not None:
+        email_sent = await send_faculty_activation_email(
+            existing,
+            token,
+        )
+
+    return existing, email_sent
+
+
 async def create_faculty(
     payload: FacultyCreateRequest,
     db: AsyncSession,
@@ -772,6 +1025,16 @@ async def create_faculty(
 
     if reused is not None:
         return reused
+
+    reused_hod = await reuse_inactive_hod(
+        payload=payload,
+        db=db,
+        parent_faculty_id=parent_faculty_id,
+        created_by_faculty_id=created_by_faculty_id,
+    )
+
+    if reused_hod is not None:
+        return reused_hod
 
     try:
         faculty, token = await prepare_faculty_creation(
