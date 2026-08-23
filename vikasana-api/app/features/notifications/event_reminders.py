@@ -6,6 +6,15 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select, text
 
 from app.core.database import AsyncSessionLocal
+
+# Register SQLAlchemy models required by Student relationships.
+# Celery does not load the full FastAPI route import graph, so these
+# imports ensure string-based relationship targets are available.
+import app.features.auth.models
+import app.features.organization.models
+import app.features.faculty.models
+import app.features.activities.models
+import app.features.face.models
 from app.features.events.models import Event
 from app.features.events.role_guard import can_student_view_event
 from app.features.notifications.push_service import (
@@ -362,18 +371,18 @@ async def run_event_reminders() -> dict:
                         or 0
                     )
 
-                    tickets_error = int(
-                        push_result.get(
-                            "tickets_error",
-                            0,
+                    successful_student_ids = [
+                        int(student_id)
+                        for student_id in (
+                            push_result.get(
+                                "successful_student_ids",
+                                [],
+                            )
+                            or []
                         )
-                        or 0
-                    )
+                    ]
 
-                    if (
-                        messages_sent > 0
-                        and tickets_error == 0
-                    ):
+                    if successful_student_ids:
                         await (
                             _record_successful_deliveries(
                                 db,
@@ -382,7 +391,7 @@ async def run_event_reminders() -> dict:
                                     reminder["type"]
                                 ),
                                 student_ids=(
-                                    target_student_ids
+                                    successful_student_ids
                                 ),
                                 scheduled_for=(
                                     event_start
@@ -393,9 +402,11 @@ async def run_event_reminders() -> dict:
                             )
                         )
 
-                        summary[
-                            "messages_sent"
-                        ] += messages_sent
+                    summary[
+                        "messages_sent"
+                    ] += len(
+                        successful_student_ids
+                    )
 
                     print(
                         "[Push Reminder]",

@@ -22,6 +22,8 @@ services:
       - postgres
       - redis
       - minio
+    healthcheck:
+      disable: true
     restart: unless-stopped
 
   celery-beat:
@@ -32,6 +34,8 @@ services:
       - .env
     depends_on:
       - redis
+    healthcheck:
+      disable: true
     restart: unless-stopped
 
   postgres:

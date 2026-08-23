@@ -50,8 +50,6 @@ def send_email_task(self, *, email_type: str, to_email: str, to_name: str, **kwa
 
     email_type: "activation" | "faculty_otp" | "student_welcome" | "student_otp"
     """
-    import asyncio
-
     try:
         from app.core.email_service import (
             send_activation_email,
@@ -92,6 +90,35 @@ def process_activity_image(self, *, student_id: int, session_id: int, photo_id: 
         self.retry(exc=exc)
 
 
+_CELERY_ASYNC_LOOP = None
+
+
+def _run_async(coro):
+    """
+    Run async work on one persistent event loop per Celery
+    worker process.
+
+    This prevents SQLAlchemy/asyncpg pooled connections from
+    being reused across different asyncio event loops.
+    """
+    global _CELERY_ASYNC_LOOP
+
+    import asyncio
+
+    if (
+        _CELERY_ASYNC_LOOP is None
+        or _CELERY_ASYNC_LOOP.is_closed()
+    ):
+        _CELERY_ASYNC_LOOP = asyncio.new_event_loop()
+        asyncio.set_event_loop(
+            _CELERY_ASYNC_LOOP
+        )
+
+    return _CELERY_ASYNC_LOOP.run_until_complete(
+        coro
+    )
+
+
 @celery_app.task(
     bind=True,
     max_retries=2,
@@ -104,14 +131,12 @@ def run_event_reminders_task(self):
     Actual reminder logic lives in:
     app.features.notifications.event_reminders
     """
-    import asyncio
-
     try:
         from app.features.notifications.event_reminders import (
             run_event_reminders,
         )
 
-        result = asyncio.run(
+        result = _run_async(
             run_event_reminders()
         )
 
@@ -125,6 +150,54 @@ def run_event_reminders_task(self):
     except Exception as exc:
         print(
             "[Push Reminder Task] Failed:",
+            repr(exc),
+        )
+
+        raise self.retry(exc=exc)
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=2,
+    default_retry_delay=120,
+)
+def check_expo_push_receipts_task(
+    self,
+    *,
+    receipt_entries: list[dict],
+):
+    """
+    Check Expo push receipts after delivery.
+
+    receipt_entries contains only:
+    - receipt_id
+    - internal device_id
+
+    Push tokens are intentionally not included.
+    """
+    import asyncio
+
+    try:
+        from app.features.notifications.push_service import (
+            check_expo_push_receipts,
+        )
+
+        result = _run_async(
+            check_expo_push_receipts(
+                receipt_entries
+            )
+        )
+
+        print(
+            "[Push Receipt Task] Complete:",
+            result,
+        )
+
+        return result
+
+    except Exception as exc:
+        print(
+            "[Push Receipt Task] Failed:",
             repr(exc),
         )
 
