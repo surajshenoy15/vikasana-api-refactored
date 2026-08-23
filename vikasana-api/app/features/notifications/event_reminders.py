@@ -17,6 +17,7 @@ import app.features.activities.models
 import app.features.face.models
 from app.features.events.models import Event
 from app.features.events.role_guard import can_student_view_event
+from app.features.events.service import _event_window_ist_aware
 from app.features.notifications.push_service import (
     send_student_push_notifications,
 )
@@ -246,7 +247,9 @@ async def run_event_reminders() -> dict:
                 Event.is_active.is_(True),
                 Event.event_date.is_not(None),
                 Event.start_time.is_not(None),
-                Event.event_date >= now.date(),
+                Event.event_date >= (
+                    now - timedelta(days=1)
+                ).date(),
                 Event.event_date <= max_date,
             )
             .order_by(
@@ -269,6 +272,165 @@ async def run_event_reminders() -> dict:
             if event_start is None:
                 continue
 
+            # =================================================
+            # EVENT STARTED / PARTICIPATION WINDOW OPEN
+            # =================================================
+            #
+            # Celery Beat runs every 5 minutes, so treat an event
+            # as newly started only during the first 5 minutes
+            # after its configured start time.
+            #
+            # This is intentionally one-sided: unlike the 24h/2h
+            # reminder tolerance, "started" must never be sent
+            # before the event actually begins.
+            # =================================================
+
+            started_tolerance = timedelta(minutes=5)
+
+            try:
+                _, event_end = (
+                    _event_window_ist_aware(event)
+                )
+            except (TypeError, ValueError):
+                event_end = event_start
+
+            if (
+                event_start <= now
+                <= event_start + started_tolerance
+                and now <= event_end
+            ):
+                notification_type = "event_started"
+
+                summary["reminders_due"] += 1
+
+                try:
+                    visible_student_ids = (
+                        await
+                        _get_visible_registered_students(
+                            db,
+                            event=event,
+                        )
+                    )
+
+                    target_student_ids = (
+                        await
+                        _remove_already_notified_students(
+                            db,
+                            event_id=event.id,
+                            notification_type=(
+                                notification_type
+                            ),
+                            student_ids=(
+                                visible_student_ids
+                            ),
+                        )
+                    )
+
+                    if target_student_ids:
+                        body = (
+                            f"{event.title} has started. "
+                            f"You can now begin your "
+                            f"participation."
+                        )
+
+                        if event.venue_name:
+                            body += (
+                                f" Venue: "
+                                f"{event.venue_name}."
+                            )
+
+                        push_result = (
+                            await
+                            send_student_push_notifications(
+                                db,
+                                title="Event Started 🚀",
+                                body=body,
+                                data={
+                                    "type": "event_reminder",
+                                    "reminder": "started",
+                                    "event_id": event.id,
+                                    "event_title": (
+                                        event.title
+                                    ),
+                                    "route": (
+                                        "/(student)/"
+                                        "dashboard"
+                                    ),
+                                },
+                                student_ids=(
+                                    target_student_ids
+                                ),
+                            )
+                        )
+
+                        successful_student_ids = [
+                            int(student_id)
+                            for student_id in (
+                                push_result.get(
+                                    "successful_student_ids",
+                                    [],
+                                )
+                                or []
+                            )
+                        ]
+
+                        if successful_student_ids:
+                            await (
+                                _record_successful_deliveries(
+                                    db,
+                                    event_id=event.id,
+                                    notification_type=(
+                                        notification_type
+                                    ),
+                                    student_ids=(
+                                        successful_student_ids
+                                    ),
+                                    scheduled_for=(
+                                        event_start
+                                    ),
+                                )
+                            )
+
+                        summary[
+                            "messages_sent"
+                        ] += len(
+                            successful_student_ids
+                        )
+
+                        print(
+                            "[Push Reminder]",
+                            {
+                                "event_id": event.id,
+                                "reminder": "started",
+                                "targets": len(
+                                    target_student_ids
+                                ),
+                                "result": push_result,
+                            },
+                        )
+
+                except Exception as error:
+                    await db.rollback()
+
+                    summary["errors"].append(
+                        {
+                            "event_id": event.id,
+                            "reminder": "started",
+                            "error": repr(error),
+                        }
+                    )
+
+                    print(
+                        "[Push Reminder] Failed:",
+                        {
+                            "event_id": event.id,
+                            "reminder": "started",
+                            "error": repr(error),
+                        },
+                    )
+
+            # Existing pre-event reminders do not apply once
+            # the event has started.
             if event_start <= now:
                 continue
 
