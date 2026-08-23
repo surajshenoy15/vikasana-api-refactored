@@ -345,3 +345,83 @@ class Student(Base):
         back_populates="student",
         cascade="all, delete-orphan",
     )
+
+
+# --------------------------------------------------
+# STUDENT PUSH DEVICES
+# --------------------------------------------------
+
+
+class StudentPushDevice(Base):
+    """
+    Stores Expo push tokens for student mobile installations.
+
+    A student may have multiple registered devices.
+    Tokens are kept separately from the Student record so
+    existing student data and academic history remain untouched.
+    """
+
+    __tablename__ = "student_push_devices"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "expo_push_token",
+            name="uq_student_push_devices_expo_push_token",
+        ),
+        Index(
+            "ix_student_push_devices_student_active",
+            "student_id",
+            "is_active",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
+
+    student_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "students.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+    )
+
+    expo_push_token: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+
+    platform: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )

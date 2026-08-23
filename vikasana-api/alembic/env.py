@@ -4,6 +4,7 @@ from logging.config import fileConfig
 from alembic import context
 from dotenv import load_dotenv
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine import make_url
 
 load_dotenv()
 
@@ -52,9 +53,32 @@ from app.features.audit.models import AuditLog  # noqa: F401
 
 config = context.config
 
+database_url = make_url(
+    os.environ["DATABASE_URL"]
+)
+
+query = dict(database_url.query)
+
+ssl_value = query.pop(
+    "ssl",
+    None,
+)
+
+if ssl_value:
+    query["sslmode"] = ssl_value
+
+sync_database_url = database_url.set(
+    drivername="postgresql+psycopg2",
+    query=query,
+)
+
 config.set_main_option(
     "sqlalchemy.url",
-    os.environ["DATABASE_SYNC_URL"],
+    sync_database_url
+    .render_as_string(
+        hide_password=False,
+    )
+    .replace("%", "%%"),
 )
 
 if config.config_file_name is not None:

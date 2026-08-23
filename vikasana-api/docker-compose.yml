@@ -24,6 +24,16 @@ services:
       - minio
     restart: unless-stopped
 
+  celery-beat:
+    build: .
+    container_name: vikasana-celery-beat
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     container_name: vikasana-postgres

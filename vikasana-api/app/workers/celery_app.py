@@ -17,6 +17,16 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+
+    beat_schedule={
+        "check-event-push-reminders-every-5-minutes": {
+            "task": (
+                "app.workers.tasks."
+                "run_event_reminders_task"
+            ),
+            "schedule": 300.0,
+        },
+    },
 )
 
 # Auto-discover tasks from all feature modules

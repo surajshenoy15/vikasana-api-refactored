@@ -33,7 +33,7 @@ from fastapi import UploadFile
 from app.core.minio_client import get_minio, ensure_bucket, get_presigned_url
 
 from app.features.events.models import Event, EventSubmission, EventSubmissionPhoto
-from app.features.students.models import Student
+from app.features.students.models import Student, StudentPushDevice
 import boto3
 from botocore.config import Config
 from app.features.activities.models import StudentActivityStats
@@ -47,6 +47,8 @@ from app.features.events.models import EventActivityType
 
 # ✅ Certificates
 from app.features.certificates.models import Certificate, CertificateCounter
+from app.features.notifications.push_service import send_student_push_notifications
+from app.features.events.role_guard import can_student_view_event
 
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
@@ -2099,6 +2101,85 @@ async def create_event(db: AsyncSession, payload) -> dict:
         # ✅ clear cached event lists
         await cache_delete_pattern("admin:events:*")
         await cache_delete_pattern("student:events:*")
+
+        # --------------------------------------------------
+        # PUSH NOTIFICATION: NEW EVENT
+        # --------------------------------------------------
+        #
+        # The event is already committed above.
+        # Push delivery must never make event creation fail.
+        #
+        try:
+            venue_name = (
+                str(getattr(event, "venue_name", "") or "").strip()
+            )
+
+            notification_body = (
+                f"{event.title} is now available"
+            )
+
+            if venue_name:
+                notification_body += f" at {venue_name}."
+
+            else:
+                notification_body += "."
+
+            # Only evaluate students who can actually receive a push.
+            # Final visibility is determined by the SAME rule used by
+            # GET /student/events.
+            candidate_result = await db.execute(
+                select(Student.id)
+                .join(
+                    StudentPushDevice,
+                    StudentPushDevice.student_id == Student.id,
+                )
+                .where(
+                    Student.is_active.is_(True),
+                    StudentPushDevice.is_active.is_(True),
+                )
+                .distinct()
+            )
+
+            candidate_student_ids = list(
+                candidate_result.scalars().all()
+            )
+
+            visible_student_ids: list[int] = []
+
+            for student_id in candidate_student_ids:
+                if await can_student_view_event(
+                    db=db,
+                    student_id=student_id,
+                    event=event,
+                ):
+                    visible_student_ids.append(student_id)
+
+            push_result = await send_student_push_notifications(
+                db,
+                title="New Event Published 🎉",
+                body=notification_body,
+                data={
+                    "type": "event_created",
+                    "event_id": event.id,
+                    "event_title": event.title,
+                    "route": "/(student)/dashboard",
+                },
+                student_ids=visible_student_ids,
+            )
+
+            print(
+                "[Push] Event creation notification:",
+                {
+                    "event_id": event.id,
+                    "result": push_result,
+                },
+            )
+
+        except Exception as push_error:
+            print(
+                "[Push] Event notification failed after event commit:",
+                repr(push_error),
+            )
 
         return {
             "id": event.id,

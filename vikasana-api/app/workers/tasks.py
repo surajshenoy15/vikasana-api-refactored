@@ -90,3 +90,42 @@ def process_activity_image(self, *, student_id: int, session_id: int, photo_id: 
         return {"status": "processed", "photo_id": photo_id}
     except Exception as exc:
         self.retry(exc=exc)
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=2,
+    default_retry_delay=60,
+)
+def run_event_reminders_task(self):
+    """
+    Check active events and send due student push reminders.
+
+    Actual reminder logic lives in:
+    app.features.notifications.event_reminders
+    """
+    import asyncio
+
+    try:
+        from app.features.notifications.event_reminders import (
+            run_event_reminders,
+        )
+
+        result = asyncio.run(
+            run_event_reminders()
+        )
+
+        print(
+            "[Push Reminder Task] Complete:",
+            result,
+        )
+
+        return result
+
+    except Exception as exc:
+        print(
+            "[Push Reminder Task] Failed:",
+            repr(exc),
+        )
+
+        raise self.retry(exc=exc)

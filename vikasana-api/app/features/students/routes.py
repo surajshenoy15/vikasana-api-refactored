@@ -14,7 +14,7 @@ from app.features.faculty.role_policy import (
     normalize_faculty_role,
 )
 from app.features.auth.models import Admin
-from app.features.students.models import Student, StudentType
+from app.features.students.models import Student, StudentType, StudentPushDevice
 from app.features.events.models import Event, EventSubmission
 from app.features.certificates.models import Certificate
 import os
@@ -1744,6 +1744,91 @@ async def _calculate_visible_student_points(db: AsyncSession, student_id: int) -
         return 0
 
 student_router = APIRouter(prefix="/students", tags=["Student - Profile"])
+
+
+class StudentPushDeviceRegisterRequest(BaseModel):
+    expo_push_token: str
+    platform: str
+
+
+@student_router.post("/push-device")
+async def register_student_push_device(
+    payload: StudentPushDeviceRegisterRequest,
+    db: AsyncSession = Depends(get_db),
+    current_student: Student = Depends(get_current_student),
+):
+    """
+    Register or refresh an Expo push token for the
+    currently authenticated student.
+
+    One student may have multiple devices.
+    The Expo push token itself is globally unique.
+    """
+
+    if getattr(current_student, "is_active", True) is False:
+        raise HTTPException(
+            status_code=403,
+            detail="Student account is inactive. Please contact admin.",
+        )
+
+    token = str(payload.expo_push_token or "").strip()
+    platform = str(payload.platform or "").strip().lower()
+
+    if not token:
+        raise HTTPException(
+            status_code=422,
+            detail="expo_push_token is required",
+        )
+
+    if len(token) > 255:
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid Expo push token",
+        )
+
+    if platform not in {"android", "ios"}:
+        raise HTTPException(
+            status_code=422,
+            detail="platform must be android or ios",
+        )
+
+    result = await db.execute(
+        select(StudentPushDevice).where(
+            StudentPushDevice.expo_push_token == token
+        )
+    )
+
+    device = result.scalar_one_or_none()
+
+    if device is None:
+        device = StudentPushDevice(
+            student_id=current_student.id,
+            expo_push_token=token,
+            platform=platform,
+            is_active=True,
+        )
+
+        db.add(device)
+
+    else:
+        # A push token represents one app installation.
+        # If another student signs into the same installation,
+        # move the token to the currently authenticated student.
+        device.student_id = current_student.id
+        device.platform = platform
+        device.is_active = True
+        device.last_seen_at = func.now()
+        device.updated_at = func.now()
+
+    await db.commit()
+
+    return {
+        "ok": True,
+        "device_id": device.id,
+        "student_id": current_student.id,
+        "platform": platform,
+        "is_active": True,
+    }
 
 
 @student_router.get("/me")
