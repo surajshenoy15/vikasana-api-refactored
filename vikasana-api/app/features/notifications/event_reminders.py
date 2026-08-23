@@ -15,7 +15,10 @@ import app.features.organization.models
 import app.features.faculty.models
 import app.features.activities.models
 import app.features.face.models
-from app.features.events.models import Event
+from app.features.events.models import (
+    Event,
+    EventSubmission,
+)
 from app.features.events.role_guard import can_student_view_event
 from app.features.events.service import _event_window_ist_aware
 from app.features.notifications.push_service import (
@@ -113,6 +116,28 @@ async def _get_visible_registered_students(
             )
 
     return visible_student_ids
+
+
+async def _get_incomplete_submission_student_ids(
+    db,
+    *,
+    event_id: int,
+) -> list[int]:
+    result = await db.execute(
+        select(EventSubmission.student_id)
+        .where(
+            EventSubmission.event_id == event_id,
+            EventSubmission.status.in_(
+                ["in_progress", "draft"]
+            ),
+        )
+        .distinct()
+    )
+
+    return [
+        int(student_id)
+        for student_id in result.scalars().all()
+    ]
 
 
 async def _remove_already_notified_students(
@@ -425,6 +450,190 @@ async def run_event_reminders() -> dict:
                         {
                             "event_id": event.id,
                             "reminder": "started",
+                            "error": repr(error),
+                        },
+                    )
+
+            # =================================================
+            # SUBMISSION DEADLINE - 1 HOUR BEFORE EVENT END
+            # =================================================
+
+            deadline_target = timedelta(hours=1)
+            deadline_tolerance = timedelta(minutes=5)
+
+            remaining_to_end = event_end - now
+
+            if (
+                event_start <= now < event_end
+                and (
+                    deadline_target - deadline_tolerance
+                    <= remaining_to_end
+                    <= deadline_target + deadline_tolerance
+                )
+            ):
+                notification_type = (
+                    "submission_deadline_1h"
+                )
+
+                summary["reminders_due"] += 1
+
+                try:
+                    visible_student_ids = (
+                        await
+                        _get_visible_registered_students(
+                            db,
+                            event=event,
+                        )
+                    )
+
+                    incomplete_student_ids = (
+                        await
+                        _get_incomplete_submission_student_ids(
+                            db,
+                            event_id=event.id,
+                        )
+                    )
+
+                    visible_set = set(
+                        visible_student_ids
+                    )
+
+                    candidate_student_ids = [
+                        student_id
+                        for student_id
+                        in incomplete_student_ids
+                        if student_id in visible_set
+                    ]
+
+                    target_student_ids = (
+                        await
+                        _remove_already_notified_students(
+                            db,
+                            event_id=event.id,
+                            notification_type=(
+                                notification_type
+                            ),
+                            student_ids=(
+                                candidate_student_ids
+                            ),
+                        )
+                    )
+
+                    if target_student_ids:
+                        deadline_label = (
+                            event_end.strftime(
+                                "%I:%M %p"
+                            ).lstrip("0")
+                        )
+
+                        body = (
+                            f"{event.title} closes "
+                            f"in about 1 hour at "
+                            f"{deadline_label}. "
+                            f"Finish and submit your "
+                            f"participation before "
+                            f"the deadline."
+                        )
+
+                        push_result = (
+                            await
+                            send_student_push_notifications(
+                                db,
+                                title=(
+                                    "Submission Deadline ⏳"
+                                ),
+                                body=body,
+                                data={
+                                    "type": (
+                                        "event_reminder"
+                                    ),
+                                    "reminder": (
+                                        "deadline_1h"
+                                    ),
+                                    "event_id": event.id,
+                                    "event_title": (
+                                        event.title
+                                    ),
+                                    "route": (
+                                        "/(student)/"
+                                        "dashboard"
+                                    ),
+                                },
+                                student_ids=(
+                                    target_student_ids
+                                ),
+                            )
+                        )
+
+                        successful_student_ids = [
+                            int(student_id)
+                            for student_id in (
+                                push_result.get(
+                                    "successful_student_ids",
+                                    [],
+                                )
+                                or []
+                            )
+                        ]
+
+                        if successful_student_ids:
+                            await (
+                                _record_successful_deliveries(
+                                    db,
+                                    event_id=event.id,
+                                    notification_type=(
+                                        notification_type
+                                    ),
+                                    student_ids=(
+                                        successful_student_ids
+                                    ),
+                                    scheduled_for=(
+                                        event_end
+                                        - deadline_target
+                                    ),
+                                )
+                            )
+
+                        summary[
+                            "messages_sent"
+                        ] += len(
+                            successful_student_ids
+                        )
+
+                        print(
+                            "[Push Reminder]",
+                            {
+                                "event_id": event.id,
+                                "reminder": (
+                                    "deadline_1h"
+                                ),
+                                "targets": len(
+                                    target_student_ids
+                                ),
+                                "result": push_result,
+                            },
+                        )
+
+                except Exception as error:
+                    await db.rollback()
+
+                    summary["errors"].append(
+                        {
+                            "event_id": event.id,
+                            "reminder": (
+                                "deadline_1h"
+                            ),
+                            "error": repr(error),
+                        }
+                    )
+
+                    print(
+                        "[Push Reminder] Failed:",
+                        {
+                            "event_id": event.id,
+                            "reminder": (
+                                "deadline_1h"
+                            ),
                             "error": repr(error),
                         },
                     )
