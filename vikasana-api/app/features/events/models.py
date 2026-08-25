@@ -27,6 +27,17 @@ class Event(Base):
     description = Column(Text, nullable=True)
 
     required_photos = Column(Integer, nullable=False, default=3)
+
+    # Photo capture timing mode:
+    # - normal: all required photos can be captured during the event
+    # - split_time: event duration is divided equally across required photos
+    photo_capture_mode = Column(
+        String(20),
+        nullable=False,
+        default="normal",
+        server_default="normal",
+    )
+
     is_active = Column(Boolean, default=True)
 
     event_date = Column(Date, nullable=True)

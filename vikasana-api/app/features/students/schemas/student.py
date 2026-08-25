@@ -77,6 +77,7 @@ class BulkUploadResult(BaseModel):
 # ─────────────────────────────────────────────
 
 class StudentPointAdjustmentCreate(BaseModel):
+    activity_type_id: int
     activity_name: str = Field(..., min_length=1, max_length=120)
     category: Optional[str] = Field(default=None, max_length=80)
     points: int
@@ -86,6 +87,7 @@ class StudentPointAdjustmentCreate(BaseModel):
 
 
 class StudentPointAdjustmentUpdate(BaseModel):
+    activity_type_id: Optional[int] = None
     activity_name: Optional[str] = Field(default=None, min_length=1, max_length=120)
     category: Optional[str] = Field(default=None, max_length=80)
     points: Optional[int] = None
@@ -96,6 +98,7 @@ class StudentPointAdjustmentUpdate(BaseModel):
 
 class StudentPointAdjustmentOut(BaseModel):
     id: int
+    activity_type_id: Optional[int] = None
     activity_name: str
     category: Optional[str] = None
     points: int

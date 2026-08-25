@@ -85,8 +85,26 @@ async def _get_visible_registered_students(
     *,
     event: Event,
 ) -> list[int]:
+    """
+    Return students who:
+
+    1. are active,
+    2. have an active push device,
+    3. have registered for this specific event, and
+    4. are allowed to view this event.
+
+    An EventSubmission row is the authoritative registration
+    record. This includes the new "registered" state as well as
+    later participation/submission states.
+    """
+
     result = await db.execute(
         select(Student.id)
+        .join(
+            EventSubmission,
+            EventSubmission.student_id
+            == Student.id,
+        )
         .join(
             StudentPushDevice,
             StudentPushDevice.student_id
@@ -95,13 +113,16 @@ async def _get_visible_registered_students(
         .where(
             Student.is_active.is_(True),
             StudentPushDevice.is_active.is_(True),
+            EventSubmission.event_id == event.id,
         )
         .distinct()
     )
 
-    candidate_student_ids = list(
-        result.scalars().all()
-    )
+    candidate_student_ids = [
+        int(student_id)
+        for student_id
+        in result.scalars().all()
+    ]
 
     visible_student_ids: list[int] = []
 

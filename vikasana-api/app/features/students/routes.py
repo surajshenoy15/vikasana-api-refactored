@@ -317,6 +317,7 @@ def _student_out(
 def _point_item_out(item) -> StudentPointAdjustmentOut:
     return StudentPointAdjustmentOut(
         id=item.id,
+        activity_type_id=getattr(item, "activity_type_id", None),
         activity_name=item.activity_name or "Manual Points",
         category=item.category,
         points=int(item.delta_points or 0),
@@ -1589,6 +1590,7 @@ async def create_student_activity_point_admin(
         item, total_points = await create_student_point_adjustment(
             db,
             student_id=student_id,
+            activity_type_id=payload.activity_type_id,
             activity_name=payload.activity_name,
             category=payload.category,
             points=payload.points,
@@ -1629,6 +1631,7 @@ async def update_student_activity_point_admin(
         item, total_points = await update_student_point_adjustment(
             db,
             adjustment_id=adjustment_id,
+            activity_type_id=payload.activity_type_id,
             activity_name=payload.activity_name,
             category=payload.category,
             points=payload.points,

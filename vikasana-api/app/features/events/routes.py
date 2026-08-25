@@ -60,12 +60,62 @@ from app.features.events.service import (
     get_student_event_draft_progress,
     get_student_activity_progress,  # ✅ NEW
     _ensure_event_window,
+    _event_window_utc,
     upload_event_thumbnail_file,
 )
 from app.core.minio_client import get_presigned_url
 router = APIRouter(tags=["Events"])
 
 DEFAULT_EVENT_RADIUS_M = 500
+
+
+def _photo_capture_slot_utc(
+    event: Event,
+    seq_no: int,
+) -> tuple[datetime, datetime]:
+    """
+    Return the fixed UTC capture window for one photo sequence.
+
+    Example:
+      event 09:00 -> 14:00
+      required_photos = 5
+
+      seq 1 -> 09:00 -> 10:00
+      seq 2 -> 10:00 -> 11:00
+      seq 3 -> 11:00 -> 12:00
+      seq 4 -> 12:00 -> 13:00
+      seq 5 -> 13:00 -> 14:00
+    """
+
+    required_photos = int(
+        getattr(event, "required_photos", 3) or 3
+    )
+
+    if seq_no < 1 or seq_no > required_photos:
+        raise ValueError(
+            f"seq_no must be between 1 and {required_photos}"
+        )
+
+    event_start_utc, event_end_utc = _event_window_utc(event)
+
+    total_seconds = (
+        event_end_utc - event_start_utc
+    ).total_seconds()
+
+    if total_seconds <= 0:
+        raise ValueError("Event duration must be greater than zero")
+
+    slot_seconds = total_seconds / required_photos
+
+    slot_start = event_start_utc + (
+        seq_no - 1
+    ) * (event_end_utc - event_start_utc) / required_photos
+
+    slot_end = event_start_utc + (
+        seq_no
+    ) * (event_end_utc - event_start_utc) / required_photos
+
+    return slot_start, slot_end
 
 
 # ---------------------- HELPERS --------------------------
@@ -118,6 +168,7 @@ def _event_out_dict(ev: Event) -> dict:
         "title": ev.title,
         "description": ev.description,
         "required_photos": ev.required_photos,
+        "photo_capture_mode": getattr(ev, "photo_capture_mode", None) or "normal",
         "is_active": bool(getattr(ev, "is_active", True)),
         "event_date": ev.event_date,
         "start_time": ev.start_time,
@@ -535,6 +586,26 @@ async def student_events(
             for eid, c in count_rows.all()
         }
 
+    # ✅ Logged-in student's registration/submission state
+    student_submission_map: dict[int, str] = {}
+
+    if event_ids:
+        submission_rows = await db.execute(
+            select(
+                EventSubmission.event_id,
+                EventSubmission.status,
+            ).where(
+                EventSubmission.event_id.in_(event_ids),
+                EventSubmission.student_id == student.id,
+            )
+        )
+
+        student_submission_map = {
+            int(event_id): str(status)
+            for event_id, status
+            in submission_rows.all()
+        }
+
     # ✅ Load ActivityType caps/rates for AUTO points
     at_map: dict[int, ActivityType] = {}
     all_at_ids: set[int] = set()
@@ -643,6 +714,17 @@ async def student_events(
         item["max_participants"] = max_participants
         item["capacity"] = max_participants
 
+        submission_status = student_submission_map.get(
+            int(ev.id)
+        )
+
+        item["user_registered"] = (
+            submission_status is not None
+        )
+        item["submission_status"] = (
+            submission_status
+        )
+
         item.update(_points_for(item))
         result.append(item)
 
@@ -703,10 +785,10 @@ async def register_event(
         event_id,
     )
 
-    # Log participation start only when this request actually
-    # created the EventSubmission. Repeated Register requests
-    # for the same event must not create duplicate audit rows.
-    if bool(result.get("created")):
+    # Log participation start only when participation actually
+    # enters the in_progress state. Upcoming registration alone
+    # must not be recorded as participation started.
+    if bool(result.get("started")):
         event = await db.get(
             Event,
             event_id,
@@ -805,6 +887,10 @@ async def upload_photos(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
+    # Authoritative server time when the upload request reaches the API.
+    # Device clock is never trusted for split-time unlocking.
+    request_received_at_utc = datetime.now(timezone.utc)
+
     sub_res = await db.execute(
         select(EventSubmission).where(
             EventSubmission.id == submission_id,
@@ -921,6 +1007,50 @@ async def upload_photos(
     for idx, img in enumerate(normalized_images):
         if seq_no > required_photos:
             break
+
+        # =====================================================
+        # SPLIT-TIME PHOTO WINDOW ENFORCEMENT
+        # =====================================================
+        photo_capture_mode = str(
+            getattr(ev, "photo_capture_mode", None) or "normal"
+        ).strip().lower()
+
+        if photo_capture_mode == "split_time":
+            slot_start_utc, slot_end_utc = _photo_capture_slot_utc(
+                ev,
+                seq_no,
+            )
+
+            server_now_utc = request_received_at_utc
+
+            # CUMULATIVE UNLOCKING:
+            #
+            # Once a photo sequence becomes available, it remains available
+            # until the overall event ends.
+            #
+            # Example 09:00 -> 14:00 / 5 photos:
+            # Photo 1 unlocks 09:00
+            # Photo 2 unlocks 10:00
+            # Photo 3 unlocks 11:00
+            # Photo 4 unlocks 12:00
+            # Photo 5 unlocks 13:00
+            #
+            # A student joining at 10:30 can therefore capture
+            # Photo 1 and Photo 2 consecutively.
+
+            if server_now_utc < slot_start_utc:
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "code": "PHOTO_SLOT_NOT_STARTED",
+                        "message": (
+                            f"Photo {seq_no} is not available yet."
+                        ),
+                        "photo_number": seq_no,
+                        "required_photos": required_photos,
+                        "available_at": slot_start_utc.isoformat(),
+                    },
+                )
 
         file_bytes = await img.read()
 
