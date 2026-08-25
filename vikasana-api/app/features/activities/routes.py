@@ -45,6 +45,7 @@ from app.core.activity_storage import upload_activity_image
 from app.features.activities.models import ActivityPhoto
 from app.features.activities.models import ActivitySession, ActivitySessionStatus
 from app.features.activities.models import ActivityType
+from app.features.activities.models import StudentPointAdjustment
 from app.features.events.models import Event, EventSubmission
 
 # ✅ Face check models + services
@@ -519,15 +520,20 @@ async def my_sessions(
     student=Depends(get_current_student),
 ):
     """
-    Dashboard/history should show real event submissions,
-    not old ActivitySession test records.
+    Unified student history.
+
+    Includes:
+    - real EventSubmission rows as one history card per event submission
+    - genuine standalone ActivitySession rows
+
+    Event-generated ActivitySession rows are not returned separately,
+    so the same event does not appear multiple times for each activity type.
     """
 
-    conditions = [
-        EventSubmission.student_id == student.id,
-    ]
+    # ─────────────────────────────────────────────────────────
+    # 1. Real event submissions
+    # ─────────────────────────────────────────────────────────
 
-    # ✅ hide deleted events if these columns exist
     event_conditions = []
 
     if hasattr(Event, "is_deleted"):
@@ -539,70 +545,308 @@ async def my_sessions(
     stmt = (
         select(EventSubmission, Event)
         .join(Event, Event.id == EventSubmission.event_id)
-        .where(*conditions, *event_conditions)
+        .where(
+            EventSubmission.student_id == student.id,
+            *event_conditions,
+        )
         .order_by(EventSubmission.id.desc())
     )
 
-    rows = (await db.execute(stmt)).all()
+    event_rows = (await db.execute(stmt)).all()
 
     result = []
+    student_event_titles: set[str] = set()
 
-    for submission, event in rows:
+    for submission, event in event_rows:
         raw_status = getattr(submission, "status", None)
 
         if hasattr(raw_status, "value"):
-            status = raw_status.value
+            status = str(raw_status.value)
         else:
-            status = str(raw_status or "").upper()
+            status = str(raw_status or "")
 
-        event_date = (
+        event_title = (
+            getattr(event, "title", "")
+            or f"Event #{getattr(event, 'id', '')}"
+        )
+
+        normalized_title = event_title.strip().lower()
+        if normalized_title:
+            student_event_titles.add(normalized_title)
+
+        event_date_obj = (
             getattr(event, "event_date", None)
             or getattr(event, "date", None)
             or getattr(event, "start_date", None)
         )
 
-        submitted_at = (
+        event_date = (
+            event_date_obj.isoformat()
+            if hasattr(event_date_obj, "isoformat")
+            else event_date_obj
+        )
+
+        submitted_at_obj = (
             getattr(submission, "submitted_at", None)
             or getattr(submission, "created_at", None)
             or getattr(submission, "updated_at", None)
         )
 
-        points = (
-            getattr(submission, "points_awarded", None)
-            or getattr(submission, "awarded_points", None)
-            or getattr(submission, "points", None)
-            or getattr(event, "points", None)
-            or 0
+        submitted_at = (
+            submitted_at_obj.isoformat()
+            if hasattr(submitted_at_obj, "isoformat")
+            else submitted_at_obj
+        )
+
+        # Preserve a legitimate zero-point event.
+        points = getattr(submission, "points_awarded", None)
+
+        if points is None:
+            points = getattr(submission, "awarded_points", None)
+
+        if points is None:
+            points = getattr(submission, "points", None)
+
+        if points is None:
+            points = getattr(event, "points", None)
+
+        points = int(points or 0)
+
+        location = (
+            getattr(event, "location", None)
+            or getattr(event, "venue_name", None)
         )
 
         result.append({
             "id": getattr(submission, "id", None),
             "submission_id": getattr(submission, "id", None),
-            "session_id": getattr(submission, "id", None),
+            "session_id": None,
+
+            "record_type": "event",
 
             "event_id": getattr(event, "id", None),
-            "activity_name": getattr(event, "title", "") or f"Event #{getattr(event, 'id', '')}",
-            "title": getattr(event, "title", "") or f"Event #{getattr(event, 'id', '')}",
-            "event_title": getattr(event, "title", "") or f"Event #{getattr(event, 'id', '')}",
+            "activity_type_id": None,
+
+            "activity_name": event_title,
+            "title": event_title,
+            "event_title": event_title,
 
             "category": getattr(event, "category", None),
-            "location": getattr(event, "location", None) or getattr(event, "venue_name", None),
+            "event_category": getattr(event, "category", None),
+
+            "location": location,
+            "event_location": location,
 
             "status": status,
             "session_status": status,
             "state": status,
 
-            "points": int(points or 0),
-            "points_awarded": int(points or 0),
-            "earned_points": int(points or 0),
+            "points": points,
+            "points_awarded": points,
+            "earned_points": points,
 
             "event_date": event_date,
             "date": event_date,
+
             "submitted_at": submitted_at,
             "created_at": submitted_at,
+
+            "duration_hours": None,
+        })
+
+    # ─────────────────────────────────────────────────────────
+    # 2. Genuine standalone activity sessions
+    # ─────────────────────────────────────────────────────────
+
+    standalone_stmt = (
+        select(ActivitySession, ActivityType)
+        .join(
+            ActivityType,
+            ActivityType.id == ActivitySession.activity_type_id,
+        )
+        .where(
+            ActivitySession.student_id == student.id,
+            ActivitySession.event_id.is_(None),
+            ActivitySession.event_submission_id.is_(None),
+            ActivityType.is_active == True,
+        )
+        .order_by(
+            ActivitySession.submitted_at.desc().nullslast(),
+            ActivitySession.started_at.desc(),
+            ActivitySession.id.desc(),
+        )
+    )
+
+    standalone_rows = (await db.execute(standalone_stmt)).all()
+
+    standalone_session_ids = [
+        int(session.id)
+        for session, _ in standalone_rows
+    ]
+
+    # New standalone auto-awards persist an exact delta using
+    # reason=AUTO_AWARD_SESSION_<session_id>.
+    adjustment_points: dict[int, int] = {}
+
+    if standalone_session_ids:
+        reasons = [
+            f"AUTO_AWARD_SESSION_{session_id}"
+            for session_id in standalone_session_ids
+        ]
+
+        adjustment_res = await db.execute(
+            select(StudentPointAdjustment).where(
+                StudentPointAdjustment.student_id == student.id,
+                StudentPointAdjustment.reason.in_(reasons),
+            )
+        )
+
+        for adjustment in adjustment_res.scalars().all():
+            if str(getattr(adjustment, "status", "")).lower() != "approved":
+                continue
+
+            reason = str(getattr(adjustment, "reason", "") or "")
+            prefix = "AUTO_AWARD_SESSION_"
+
+            if not reason.startswith(prefix):
+                continue
+
+            try:
+                session_id = int(reason[len(prefix):])
+            except ValueError:
+                continue
+
+            adjustment_points[session_id] = (
+                adjustment_points.get(session_id, 0)
+                + int(getattr(adjustment, "delta_points", 0) or 0)
+            )
+
+    for session, activity_type in standalone_rows:
+        activity_name = (
+            getattr(session, "activity_name", None)
+            or getattr(activity_type, "name", None)
+            or f"Activity #{getattr(session, 'activity_type_id', '')}"
+        )
+
+        # Legacy event sessions may not have linkage fields populated.
+        # If this student already has an EventSubmission with the exact
+        # same event title, the EventSubmission is the canonical History row.
+        if activity_name.strip().lower() in student_event_titles:
+            continue
+
+        raw_status = getattr(session, "status", None)
+
+        if hasattr(raw_status, "value"):
+            status = str(raw_status.value)
+        else:
+            status = str(raw_status or "")
+
+        status_upper = status.upper()
+
+        duration_hours = float(
+            getattr(session, "duration_hours", 0) or 0
+        )
+
+        points = 0
+
+        if status_upper == "APPROVED":
+            persisted_points = adjustment_points.get(int(session.id))
+
+            if persisted_points is not None:
+                points = int(persisted_points)
+            else:
+                # Legacy standalone sessions did not persist the incremental
+                # award. Use their verified duration as the historical fallback.
+                hours_per_unit = float(
+                    getattr(activity_type, "hours_per_unit", 0) or 0
+                )
+                points_per_unit = int(
+                    getattr(activity_type, "points_per_unit", 0) or 0
+                )
+                max_points = int(
+                    getattr(activity_type, "max_points", 0) or 0
+                )
+
+                if hours_per_unit > 0 and points_per_unit > 0:
+                    completed_units = int(
+                        duration_hours / hours_per_unit
+                    )
+
+                    points = completed_units * points_per_unit
+
+                    if max_points > 0:
+                        points = min(points, max_points)
+
+        submitted_at_obj = (
+            getattr(session, "submitted_at", None)
+            or getattr(session, "started_at", None)
+        )
+
+        submitted_at = (
+            submitted_at_obj.isoformat()
+            if hasattr(submitted_at_obj, "isoformat")
+            else submitted_at_obj
+        )
+
+        event_date = (
+            submitted_at_obj.date().isoformat()
+            if submitted_at_obj is not None
+            and hasattr(submitted_at_obj, "date")
+            else None
+        )
+
+        started_at_obj = getattr(session, "started_at", None)
+
+        event_start_time = (
+            started_at_obj.time().isoformat(timespec="seconds")
+            if started_at_obj is not None
+            else None
+        )
+
+        result.append({
+            "id": int(session.id),
+            "submission_id": None,
+            "session_id": int(session.id),
+
+            "record_type": "standalone",
+
+            "event_id": None,
+            "activity_type_id": getattr(
+                session,
+                "activity_type_id",
+                None,
+            ),
+
+            "activity_name": activity_name,
+            "title": activity_name,
+            "event_title": activity_name,
+
+            "category": getattr(activity_type, "name", None),
+            "event_category": getattr(activity_type, "name", None),
+
+            "location": None,
+            "event_location": None,
+
+            "status": status,
+            "session_status": status,
+            "state": status,
+
+            "points": int(points),
+            "points_awarded": int(points),
+            "earned_points": int(points),
+
+            "event_date": event_date,
+            "date": event_date,
+            "event_start_time": event_start_time,
+
+            "submitted_at": submitted_at,
+            "created_at": submitted_at,
+
+            "duration_hours": duration_hours,
         })
 
     return result
+
 
 @router.get("/sessions/{session_id}", response_model=SessionDetailOut)
 async def session_detail(

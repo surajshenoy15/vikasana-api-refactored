@@ -57,6 +57,22 @@ class ActivitySession(Base):
         index=True,
     )
 
+    # Optional linkage for sessions created from event submissions.
+    # Legacy/non-event activity sessions remain valid with NULL values.
+    event_id = Column(
+        Integer,
+        ForeignKey("events.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    event_submission_id = Column(
+        Integer,
+        ForeignKey("event_submissions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     activity_name = Column(String(200), nullable=False)
     description = Column(String(800), nullable=True)
     session_code = Column(String(32), unique=True, nullable=False, index=True)
@@ -323,6 +339,15 @@ class StudentPointAdjustment(Base):
         Integer,
         ForeignKey("students.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
+    )
+
+    # Activity type this manual/admin point entry contributes to.
+    # Nullable only for deployment/legacy compatibility.
+    activity_type_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("activity_types.id", ondelete="RESTRICT"),
+        nullable=True,
         index=True,
     )
 

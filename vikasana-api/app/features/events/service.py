@@ -12,7 +12,7 @@ from app.features.activities.models import ActivityFaceCheck
 from sqlalchemy import delete
 from typing import List
 from fastapi import HTTPException
-from sqlalchemy import select, func, delete as sql_delete, update, cast, String
+from sqlalchemy import select, func, delete as sql_delete, update, cast, String, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -32,7 +32,13 @@ import uuid
 from fastapi import UploadFile
 from app.core.minio_client import get_minio, ensure_bucket, get_presigned_url
 
-from app.features.events.models import Event, EventSubmission, EventSubmissionPhoto
+from app.features.events.models import (
+    Event,
+    EventSubmission,
+    EventSubmissionPhoto,
+    EventParticipant,
+    EventParticipantImportBatch,
+)
 from app.features.students.models import Student, StudentPushDevice
 import boto3
 from botocore.config import Config
@@ -62,6 +68,167 @@ REGULAR_REQUIRED_ACTIVITY_TYPES = 5
 
 DIPLOMA_TOTAL_REQUIRED = 60
 DIPLOMA_REQUIRED_ACTIVITY_TYPES = 3
+
+
+async def _send_certificate_ready_notifications(
+    db: AsyncSession,
+    *,
+    event: Event,
+    student_ids: list[int],
+) -> dict[str, Any]:
+    """
+    Send one certificate-ready notification per student/event.
+
+    Certificates must already be committed before this helper is called.
+    Successful deliveries are deduped in student_notification_deliveries.
+    """
+
+    clean_student_ids = sorted({
+        int(student_id)
+        for student_id in student_ids
+        if student_id is not None
+    })
+
+    if not clean_student_ids:
+        return {
+            "targets": 0,
+            "successful_student_ids": [],
+        }
+
+    notification_type = "certificate_ready"
+
+    dedupe_by_student = {
+        student_id: (
+            f"event:{event.id}:"
+            f"student:{student_id}:"
+            f"{notification_type}"
+        )
+        for student_id in clean_student_ids
+    }
+
+    dedupe_keys = list(dedupe_by_student.values())
+
+    existing_result = await db.execute(
+        text(
+            """
+            SELECT dedupe_key
+            FROM student_notification_deliveries
+            WHERE dedupe_key = ANY(:dedupe_keys)
+            """
+        ),
+        {
+            "dedupe_keys": dedupe_keys,
+        },
+    )
+
+    existing_keys = {
+        str(row[0])
+        for row in existing_result.all()
+    }
+
+    target_student_ids = [
+        student_id
+        for student_id, dedupe_key
+        in dedupe_by_student.items()
+        if dedupe_key not in existing_keys
+    ]
+
+    if not target_student_ids:
+        return {
+            "targets": 0,
+            "successful_student_ids": [],
+            "already_notified": len(clean_student_ids),
+        }
+
+    push_result = await send_student_push_notifications(
+        db,
+        title="Certificate Generated 🎉",
+        body=(
+            f"Your certificate for {event.title} is ready. "
+            f"Open LoRaa Connect to view/download it."
+        ),
+        data={
+            "type": "certificate_ready",
+            "event_id": event.id,
+            "event_title": event.title,
+            "route": "/(student)/certificates",
+        },
+        student_ids=target_student_ids,
+    )
+
+    successful_student_ids = [
+        int(student_id)
+        for student_id in (
+            push_result.get(
+                "successful_student_ids",
+                [],
+            )
+            or []
+        )
+    ]
+
+    scheduled_for = datetime.now(timezone.utc)
+
+    for student_id in successful_student_ids:
+        dedupe_key = dedupe_by_student[student_id]
+
+        await db.execute(
+            text(
+                """
+                INSERT INTO student_notification_deliveries (
+                    student_id,
+                    event_id,
+                    notification_type,
+                    dedupe_key,
+                    status,
+                    scheduled_for,
+                    sent_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    :student_id,
+                    :event_id,
+                    :notification_type,
+                    :dedupe_key,
+                    'SENT',
+                    :scheduled_for,
+                    NOW(),
+                    NOW(),
+                    NOW()
+                )
+                ON CONFLICT (dedupe_key)
+                DO NOTHING
+                """
+            ),
+            {
+                "student_id": student_id,
+                "event_id": event.id,
+                "notification_type": notification_type,
+                "dedupe_key": dedupe_key,
+                "scheduled_for": scheduled_for,
+            },
+        )
+
+    if successful_student_ids:
+        await db.commit()
+
+    print(
+        "[Push Certificate Ready]",
+        {
+            "event_id": event.id,
+            "targets": len(target_student_ids),
+            "successful_student_ids": successful_student_ids,
+        },
+    )
+
+    return {
+        "targets": len(target_student_ids),
+        "successful_student_ids": successful_student_ids,
+        "push_result": push_result,
+    }
+
+
 
 
 # =========================================================
@@ -323,6 +490,10 @@ async def get_student_event_draft_progress(db: AsyncSession, student_id: int, ev
             "submission_id": None,
             "status": None,
             "required_photos": required_photos,
+            "photo_capture_mode": getattr(event, "photo_capture_mode", None) or "normal",
+            "event_date": event.event_date,
+            "start_time": event.start_time,
+            "end_time": event.end_time,
             "uploaded_seq_nos": [],
             "next_seq_no": 1,
             "is_complete": False,
@@ -345,6 +516,10 @@ async def get_student_event_draft_progress(db: AsyncSession, student_id: int, ev
         "submission_id": sub.id,
         "status": sub.status,
         "required_photos": required_photos,
+        "photo_capture_mode": getattr(event, "photo_capture_mode", None) or "normal",
+        "event_date": event.event_date,
+        "start_time": event.start_time,
+        "end_time": event.end_time,
         "uploaded_seq_nos": sorted(uploaded_seq),
         "next_seq_no": next_seq,
         "is_complete": is_complete,
@@ -544,26 +719,42 @@ async def create_or_update_activity_session_from_submission(
     sessions = []
 
     for at_id in activity_type_ids:
+        # First try the permanent event-submission linkage.
         q = await db.execute(
             select(ActivitySession)
             .where(
-                ActivitySession.student_id == submission.student_id,
+                ActivitySession.event_submission_id == submission.id,
                 ActivitySession.activity_type_id == at_id,
-                ActivitySession.started_at <= end_utc,
-                func.coalesce(
-                    ActivitySession.expires_at,
-                    ActivitySession.submitted_at,
-                    end_utc,
-                ) >= start_utc,
             )
             .order_by(ActivitySession.id.desc())
         )
 
-        # ✅ Use first result instead of scalar_one_or_none()
-        # because duplicate sessions may already exist.
         session = q.scalars().first()
 
+        # Legacy fallback for rows created before event linkage existed.
+        if session is None:
+            q = await db.execute(
+                select(ActivitySession)
+                .where(
+                    ActivitySession.student_id == submission.student_id,
+                    ActivitySession.activity_type_id == at_id,
+                    ActivitySession.started_at <= end_utc,
+                    func.coalesce(
+                        ActivitySession.expires_at,
+                        ActivitySession.submitted_at,
+                        end_utc,
+                    ) >= start_utc,
+                )
+                .order_by(ActivitySession.id.desc())
+            )
+
+            session = q.scalars().first()
+
         if session:
+            # Backfill linkage whenever an older event session is encountered.
+            session.event_id = event.id
+            session.event_submission_id = submission.id
+
             session.status = target_status
 
             if target_status in [
@@ -584,6 +775,8 @@ async def create_or_update_activity_session_from_submission(
             session = ActivitySession(
                 student_id=submission.student_id,
                 activity_type_id=at_id,
+                event_id=event.id,
+                event_submission_id=submission.id,
                 activity_name=getattr(event, "title", "Event Activity"),
                 description=getattr(submission, "description", None),
                 session_code=secrets.token_hex(8),
@@ -688,9 +881,14 @@ async def _calculate_submission_points(
     - Each activity type can give maximum 20 points lifetime per student.
     """
 
-    start_utc, end_utc = _event_window_utc(event)
-    if end_utc <= start_utc:
-        end_utc = start_utc + timedelta(hours=6)
+    # Authoritative duration for THIS submission only:
+    # first captured photo -> last captured photo,
+    # clamped inside the event window.
+    _, _, submission_verified_hours = await _photo_window_for_submission(
+        db=db,
+        submission_id=submission.id,
+        event=event,
+    )
 
     total_points = 0
     breakdown: dict[int, dict] = {}
@@ -723,39 +921,12 @@ async def _calculate_submission_points(
     for mapping, at in rows:
         at_id = int(mapping.activity_type_id)
 
-        session_end = func.coalesce(
-            ActivitySession.expires_at,
-            ActivitySession.submitted_at,
-            end_utc,
+        # Every activity type mapped to this event receives the same
+        # verified duration from THIS submission only.
+        hours = max(
+            0.0,
+            float(submission_verified_hours or 0.0),
         )
-
-        hrs_q = await db.execute(
-            select(
-                func.coalesce(
-                    func.sum(
-                        func.greatest(
-                            0.0,
-                            func.extract(
-                                "epoch",
-                                (
-                                    func.least(session_end, end_utc)
-                                    - func.greatest(ActivitySession.started_at, start_utc)
-                                ),
-                            ) / 3600.0,
-                        )
-                    ),
-                    0.0,
-                )
-            ).where(
-                ActivitySession.student_id == submission.student_id,
-                ActivitySession.activity_type_id == at_id,
-                func.lower(cast(ActivitySession.status, String)) == "approved",
-                ActivitySession.started_at <= end_utc,
-                session_end >= start_utc,
-            )
-        )
-
-        hours = float(hrs_q.scalar() or 0.0)
 
         # ✅ Always force max 20 points per activity type
         configured_max = getattr(at, "max_points", None)
@@ -770,43 +941,157 @@ async def _calculate_submission_points(
         score_mode = str(getattr(mapping, "score_mode", "AUTO") or "AUTO").upper()
         min_required_hours = float(getattr(mapping, "min_required_hours", 0) or 0)
 
+        stats_row = stats_by_type.get(at_id)
+
+        previous_hours = float(
+            getattr(stats_row, "total_verified_hours", 0.0) or 0.0
+        )
+
+        already_awarded = int(
+            getattr(stats_row, "points_awarded", 0) or 0
+        )
+
+        remaining_cap = max(
+            0,
+            int(max_points) - already_awarded,
+        )
+
         raw_points = 0
+        target_total_points = already_awarded
+        points_to_award = 0
 
-        if hours <= 0:
-            raw_points = 0
+        # Contribution to cumulative progress for THIS event.
+        #
+        # AUTO:
+        #   actual verified first-photo -> last-photo hours
+        #
+        # MANUAL:
+        #   configured points are converted back to equivalent hours.
+        #   With 4 hrs = 1 point:
+        #       5 manual points -> 20 equivalent hours.
+        contribution_hours = max(0.0, hours)
 
-        elif score_mode == "MANUAL":
-            if hours >= min_required_hours:
-                raw_points = int(getattr(mapping, "manual_points", 0) or 0)
+        if score_mode == "MANUAL":
+            manual_points = 0
+
+            if hours > 0 and hours >= min_required_hours:
+                manual_points = max(
+                    0,
+                    int(
+                        getattr(
+                            mapping,
+                            "manual_points",
+                            0,
+                        ) or 0
+                    ),
+                )
+
+            ppu = float(
+                getattr(at, "points_per_unit", 0) or 0
+            )
+            hpu = float(
+                getattr(at, "hours_per_unit", 0) or 0
+            )
+
+            if manual_points > 0 and ppu > 0 and hpu > 0:
+                contribution_hours = (
+                    float(manual_points) *
+                    (hpu / ppu)
+                )
+            else:
+                contribution_hours = 0.0
+
+            cumulative_hours = max(
+                0.0,
+                previous_hours + contribution_hours,
+            )
+
+            if ppu > 0 and hpu > 0:
+                try:
+                    completed_units = int(
+                        cumulative_hours // hpu
+                    )
+
+                    target_total_points = min(
+                        int(max_points),
+                        completed_units * int(ppu),
+                    )
+                except Exception:
+                    target_total_points = already_awarded
+
+            target_total_points = max(
+                already_awarded,
+                int(target_total_points),
+            )
+
+            points_to_award = max(
+                0,
+                target_total_points - already_awarded,
+            )
+
+            points_to_award = min(
+                points_to_award,
+                remaining_cap,
+            )
+
+            raw_points = target_total_points
 
         else:
-            if hours >= min_required_hours:
-                ppu = getattr(at, "points_per_unit", None)
-                hpu = getattr(at, "hours_per_unit", None)
+            cumulative_hours = max(
+                0.0,
+                previous_hours + contribution_hours,
+            )
+            # AUTO scoring is cumulative:
+            #
+            # 0.00 - 3.99 hrs  -> 0 points
+            # 4.00 - 7.99 hrs  -> 1 point
+            # 8.00 - 11.99 hrs -> 2 points
+            # ...
+            #
+            # With the current ActivityType configuration:
+            # 4 hours = 1 point, maximum 20 points.
+            ppu = getattr(at, "points_per_unit", None)
+            hpu = getattr(at, "hours_per_unit", None)
 
-                if ppu is not None and hpu:
-                    try:
-                        raw_points = int(round((hours / float(hpu)) * float(ppu)))
-                    except Exception:
-                        raw_points = 0
+            if ppu is not None and hpu:
+                try:
+                    completed_units = int(
+                        cumulative_hours // float(hpu)
+                    )
 
-        raw_points = max(0, int(raw_points))
+                    target_total_points = min(
+                        int(max_points),
+                        completed_units * int(ppu),
+                    )
+                except Exception:
+                    target_total_points = already_awarded
 
-        stats_row = stats_by_type.get(at_id)
-        already_awarded = int(getattr(stats_row, "points_awarded", 0) or 0)
+            target_total_points = max(
+                already_awarded,
+                int(target_total_points),
+            )
 
-        # ✅ Remaining points allowed for this activity type
-        remaining_cap = max(0, int(max_points) - already_awarded)
+            points_to_award = max(
+                0,
+                target_total_points - already_awarded,
+            )
 
-        # ✅ Award only remaining allowed points
-        points_to_award = min(raw_points, remaining_cap)
-        points_to_award = max(0, int(points_to_award))
+            points_to_award = min(
+                points_to_award,
+                remaining_cap,
+            )
+
+            raw_points = target_total_points
 
         breakdown[at_id] = {
             "hours": hours,
+            "contribution_hours": contribution_hours,
+            "previous_hours": previous_hours,
+            "cumulative_hours": cumulative_hours,
             "score_mode": score_mode,
             "raw_points": raw_points,
             "already_awarded": already_awarded,
+            "target_total_points": target_total_points,
             "remaining_cap": remaining_cap,
             "points_to_award": points_to_award,
             "max_points": max_points,
@@ -843,6 +1128,14 @@ async def _credit_submission_points_once(
         pts = int(data.get("points_to_award", 0) or 0)
         hrs = float(data.get("hours", 0.0) or 0.0)
 
+        cumulative_hours = float(
+            data.get("cumulative_hours", hrs) or 0.0
+        )
+
+        target_total_points = int(
+            data.get("target_total_points", pts) or 0
+        )
+
         if pts <= 0 and hrs <= 0:
             continue
 
@@ -854,16 +1147,19 @@ async def _credit_submission_points_once(
         )
         stats_row = stats_q.scalar_one_or_none()
 
-        if stats_row is None:
-            final_points_for_type = min(
-                ACTIVITY_TYPE_POINT_CAP,
-                max(0, pts),
-            )
+        final_points_for_type = min(
+            ACTIVITY_TYPE_POINT_CAP,
+            max(0, target_total_points),
+        )
 
+        if stats_row is None:
             stats_row = StudentActivityStats(
                 student_id=submission.student_id,
                 activity_type_id=int(at_id),
-                total_verified_hours=max(0.0, hrs),
+                total_verified_hours=max(
+                    0.0,
+                    cumulative_hours,
+                ),
                 points_awarded=final_points_for_type,
                 completed_at=(
                     now_utc
@@ -874,16 +1170,13 @@ async def _credit_submission_points_once(
             db.add(stats_row)
 
         else:
-            # keep the highest verified hours seen so far for this activity type
-            existing_hours = float(getattr(stats_row, "total_verified_hours", 0.0) or 0.0)
-            existing_points = int(getattr(stats_row, "points_awarded", 0) or 0)
-
-            final_points_for_type = min(
-                ACTIVITY_TYPE_POINT_CAP,
-                existing_points + max(0, pts),
+            # Store the true accumulated verified hours for this
+            # activity type across approved events.
+            stats_row.total_verified_hours = max(
+                0.0,
+                cumulative_hours,
             )
 
-            stats_row.total_verified_hours = max(existing_hours, hrs)
             stats_row.points_awarded = final_points_for_type
 
             if (
@@ -1256,7 +1549,14 @@ async def _certificate_points_for_event_activity(
 
     if ppu is not None and hpu:
         try:
-            return max(0, int(round((hours / float(hpu)) * float(ppu))))
+            completed_units = int(
+                float(hours) // float(hpu)
+            )
+
+            return max(
+                0,
+                completed_units * int(ppu),
+            )
         except Exception:
             return 0
 
@@ -1358,6 +1658,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         return float(hrs_q.scalar() or 0.0)
 
     issued = 0
+    issued_student_ids: set[int] = set()
 
     for sub in submissions:
         if sub.student_id is None:
@@ -1432,6 +1733,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             cert.pdf_path = object_key
 
             issued += 1
+            issued_student_ids.add(int(sub.student_id))
 
     if issued == 0 and mapped_ids:
         inferred_ids = await _infer_activity_type_ids_from_sessions(db, start_utc, end_utc)
@@ -1516,8 +1818,27 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                     cert.pdf_path = object_key
 
                     issued += 1
+                    issued_student_ids.add(int(sub.student_id))
 
     await db.commit()
+
+    if issued_student_ids:
+        try:
+            await _send_certificate_ready_notifications(
+                db,
+                event=event,
+                student_ids=sorted(issued_student_ids),
+            )
+        except Exception as push_error:
+            await db.rollback()
+            print(
+                "[Push Certificate Ready] Failed after certificate commit:",
+                {
+                    "event_id": event.id,
+                    "error": repr(push_error),
+                },
+            )
+
     return issued
 
 async def generate_missing_event_certificates_batch(
@@ -1635,6 +1956,7 @@ async def generate_missing_event_certificates_batch(
         return float(hrs_q.scalar() or 0.0)
 
     issued = 0
+    issued_student_ids: set[int] = set()
     skipped_existing = 0
     skipped_no_hours = 0
 
@@ -1728,8 +2050,26 @@ async def generate_missing_event_certificates_batch(
             cert.pdf_path = object_key
 
             issued += 1
+            issued_student_ids.add(int(sub.student_id))
 
     await db.commit()
+
+    if issued_student_ids:
+        try:
+            await _send_certificate_ready_notifications(
+                db,
+                event=event,
+                student_ids=sorted(issued_student_ids),
+            )
+        except Exception as push_error:
+            await db.rollback()
+            print(
+                "[Push Certificate Ready] Failed after certificate commit:",
+                {
+                    "event_id": event.id,
+                    "error": repr(push_error),
+                },
+            )
 
     remaining_q = await db.execute(
         select(func.count(EventSubmission.id))
@@ -2062,6 +2402,9 @@ async def create_event(db: AsyncSession, payload) -> dict:
             title=str(getattr(payload, "title", "")).strip(),
         description=(getattr(payload, "description", None) or None),
         required_photos=required_photos,
+        photo_capture_mode=(
+            getattr(payload, "photo_capture_mode", None) or "normal"
+        ),
         is_active=True,
         event_date=event_date,
         start_time=start_time,
@@ -2261,6 +2604,7 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
     new_end_time = _parse_time(getattr(payload, "end_time", None))
 
     required_photos_in = getattr(payload, "required_photos", None)
+    photo_capture_mode_in = getattr(payload, "photo_capture_mode", None)
 
     activity_type_ids_raw = getattr(payload, "activity_type_ids", None)
     replace_mappings = activity_type_ids_raw is not None
@@ -2303,6 +2647,9 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
         if rp < 3 or rp > 5:
             raise HTTPException(status_code=422, detail="required_photos must be between 3 and 5")
         event.required_photos = rp
+
+    if photo_capture_mode_in is not None:
+        event.photo_capture_mode = str(photo_capture_mode_in).strip().lower()
 
     if new_event_date is not None:
         event.event_date = new_event_date
@@ -2475,6 +2822,35 @@ async def delete_event(db: AsyncSession, event_id: int) -> None:
 
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
+
+    # Imported participant history is permanent event history.
+    #
+    # Stop before deleting certificates, photos or submissions.
+    # The database also uses ON DELETE RESTRICT as a final safeguard.
+    participant_history_result = await db.execute(
+        select(EventParticipant.id)
+        .where(EventParticipant.event_id == event_id)
+        .limit(1)
+    )
+
+    import_batch_result = await db.execute(
+        select(EventParticipantImportBatch.id)
+        .where(EventParticipantImportBatch.event_id == event_id)
+        .limit(1)
+    )
+
+    if (
+        participant_history_result.scalar_one_or_none() is not None
+        or import_batch_result.scalar_one_or_none() is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Event cannot be permanently deleted because "
+                "participant import/history records exist. "
+                "End or deactivate the event instead."
+            ),
+        )
 
     try:
         # 1. Get all submissions for this event
@@ -2661,7 +3037,14 @@ async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
     if not event or not getattr(event, "is_active", True):
         raise HTTPException(status_code=404, detail="Event not found")
 
-    _ensure_event_window(event)
+    start_ist, end_ist = _event_window_ist_aware(event)
+    now_ist = _now_ist_aware()
+
+    if now_ist > end_ist:
+        raise HTTPException(
+            status_code=403,
+            detail="Event has ended.",
+        )
 
     q = await db.execute(
         select(EventSubmission).where(
@@ -2670,18 +3053,51 @@ async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
         )
     )
     existing = q.scalar_one_or_none()
+
+    # -----------------------------------------------------
+    # EXISTING REGISTRATION
+    # -----------------------------------------------------
     if existing:
+        # Student registered earlier while event was upcoming.
+        # Once the event is live, the same endpoint promotes
+        # registration into actual participation.
+        if (
+            existing.status == "registered"
+            and start_ist <= now_ist <= end_ist
+        ):
+            existing.status = "in_progress"
+
+            await db.commit()
+            await db.refresh(existing)
+
+            return {
+                "submission_id": existing.id,
+                "status": existing.status,
+                "created": False,
+                "started": True,
+            }
+
         return {
             "submission_id": existing.id,
             "status": existing.status,
             "created": False,
+            "started": False,
         }
 
+    # -----------------------------------------------------
+    # NEW REGISTRATION
+    # -----------------------------------------------------
+    # Registering never starts participation automatically.
+    # This applies both before the event and while it is live.
+    #
+    # A second request from the Start Event action, while the
+    # event is ongoing, promotes "registered" -> "in_progress".
     submission = EventSubmission(
         event_id=event_id,
         student_id=student_id,
-        status="in_progress",
+        status="registered",
     )
+
     db.add(submission)
     await db.commit()
     await db.refresh(submission)
@@ -2690,6 +3106,7 @@ async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
         "submission_id": submission.id,
         "status": submission.status,
         "created": True,
+        "started": False,
     }
 
 

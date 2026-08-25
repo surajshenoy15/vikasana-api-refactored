@@ -51,6 +51,7 @@ class EventCreateIn(BaseModel):
     description: Optional[str] = None
 
     required_photos: int = Field(default=3, ge=3, le=5)
+    photo_capture_mode: str = "normal"
 
     event_date: Optional[date] = None
     start_time: Optional[time] = None
@@ -138,6 +139,19 @@ class EventCreateIn(BaseModel):
             return [str(x).strip() for x in v if str(x).strip()]
         return []
 
+    @field_validator("photo_capture_mode", mode="before")
+    @classmethod
+    def _normalize_photo_capture_mode(cls, v: Any):
+        if v is None:
+            return "normal"
+
+        mode = str(v).strip().lower()
+
+        if mode not in {"normal", "split_time"}:
+            return "normal"
+
+        return mode
+
     @field_validator("event_role", mode="before")
     @classmethod
     def _normalize_event_role(cls, v: Any):
@@ -176,6 +190,7 @@ class EventUpdateIn(BaseModel):
     description: Optional[str] = None
 
     required_photos: Optional[int] = Field(default=None, ge=3, le=5)
+    photo_capture_mode: Optional[str] = None
 
     event_date: Optional[date] = None
     start_time: Optional[time] = None
@@ -261,6 +276,19 @@ class EventUpdateIn(BaseModel):
             return [str(x).strip() for x in v if str(x).strip()]
         return []
 
+    @field_validator("photo_capture_mode", mode="before")
+    @classmethod
+    def _normalize_photo_capture_mode(cls, v: Any):
+        if v is None:
+            return None
+
+        mode = str(v).strip().lower()
+
+        if mode not in {"normal", "split_time"}:
+            return "normal"
+
+        return mode
+
     @field_validator("event_role", mode="before")
     @classmethod
     def _normalize_event_role(cls, v: Any):
@@ -293,6 +321,7 @@ class EventOut(BaseModel):
     title: str
     description: Optional[str] = None
     required_photos: int
+    photo_capture_mode: str = "normal"
     is_active: bool
 
     event_date: Optional[date] = None
@@ -318,6 +347,10 @@ class EventOut(BaseModel):
     registered_count: int = 0
     capacity: Optional[int] = None
     max_participants: Optional[int] = None
+
+    # Logged-in student's registration/submission state.
+    user_registered: bool = False
+    submission_status: Optional[str] = None
 
     # ✅ points display computed in /student/events
     points_mode: Optional[str] = None           # fixed | auto | mixed | none

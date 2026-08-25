@@ -15,7 +15,12 @@ from app.features.faculty.role_policy import (
 )
 from app.features.auth.models import Admin
 from app.features.students.models import Student, StudentType, StudentPushDevice
-from app.features.events.models import Event, EventSubmission
+from app.features.events.models import (
+    Event,
+    EventSubmission,
+    EventParticipant,
+    ExternalParticipantLinkHistory,
+)
 from app.features.certificates.models import Certificate
 import os
 from datetime import timedelta
@@ -317,6 +322,7 @@ def _student_out(
 def _point_item_out(item) -> StudentPointAdjustmentOut:
     return StudentPointAdjustmentOut(
         id=item.id,
+        activity_type_id=getattr(item, "activity_type_id", None),
         activity_name=item.activity_name or "Manual Points",
         category=item.category,
         points=int(item.delta_points or 0),
@@ -1482,6 +1488,38 @@ async def delete_student_admin(
     if not s:
         raise HTTPException(status_code=404, detail="Student not found")
 
+    # Historical external-event participation must never be destroyed.
+    #
+    # Check both the current participant link and append-only link history.
+    # This also protects a Student who was linked in the past and later
+    # unlinked/relinked.
+    current_participant_result = await db.execute(
+        select(EventParticipant.id)
+        .where(EventParticipant.student_id == student_id)
+        .limit(1)
+    )
+
+    historical_link_result = await db.execute(
+        select(ExternalParticipantLinkHistory.id)
+        .where(
+            ExternalParticipantLinkHistory.student_id == student_id
+        )
+        .limit(1)
+    )
+
+    if (
+        current_participant_result.scalar_one_or_none() is not None
+        or historical_link_result.scalar_one_or_none() is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Student cannot be permanently deleted because "
+                "historical external event participation is linked "
+                "to this account. Deactivate the student instead."
+            ),
+        )
+
     try:
         # Delete linked certificates first because certificates.student_id references students.id
         await db.execute(
@@ -1589,6 +1627,7 @@ async def create_student_activity_point_admin(
         item, total_points = await create_student_point_adjustment(
             db,
             student_id=student_id,
+            activity_type_id=payload.activity_type_id,
             activity_name=payload.activity_name,
             category=payload.category,
             points=payload.points,
@@ -1629,6 +1668,7 @@ async def update_student_activity_point_admin(
         item, total_points = await update_student_point_adjustment(
             db,
             adjustment_id=adjustment_id,
+            activity_type_id=payload.activity_type_id,
             activity_name=payload.activity_name,
             category=payload.category,
             points=payload.points,

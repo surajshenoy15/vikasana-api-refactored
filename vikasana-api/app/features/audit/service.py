@@ -145,14 +145,19 @@ async def append_audit_log(
     request_id: str | None = None,
 
     metadata: dict[str, Any] | None = None,
+    commit: bool = True,
 ) -> AuditLog:
     """
     Append one immutable audit entry.
 
     This helper performs INSERT only.
 
-    It deliberately commits the audit entry because callers will invoke
-    it only after the business/authentication action has succeeded.
+    Transaction behavior:
+    - commit=True:
+        preserve the existing behavior and commit the audit row here.
+    - commit=False:
+        flush the audit row but leave the final commit/rollback to
+        the caller so business data and audit history can be atomic.
 
     There are intentionally no audit update/delete helpers.
     """
@@ -238,7 +243,13 @@ async def append_audit_log(
 
     db.add(row)
 
-    await db.commit()
-    await db.refresh(row)
+    if commit:
+        await db.commit()
+        await db.refresh(row)
+    else:
+        # Participate in the caller's existing transaction.
+        # Flush now so DB constraints/triggers are validated,
+        # but leave the final COMMIT to the caller.
+        await db.flush()
 
     return row

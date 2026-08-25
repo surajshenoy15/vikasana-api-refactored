@@ -37,7 +37,10 @@ async def list_certificates(
             Certificate.certificate_no,
             Certificate.issued_at,
             Certificate.pdf_path,
+            Certificate.event_id,
+            Certificate.student_id,
             Student.name.label("student"),
+            Student.usn.label("student_usn"),
             ActivityType.name.label("category"),
             Event.title.label("event_title"),
         )
@@ -58,7 +61,11 @@ async def list_certificates(
             {
                 "id": r.id,
                 "certificate_no": r.certificate_no,
+                "event_id": r.event_id,
+                "student_id": r.student_id,
                 "student": r.student,
+                "student_usn": r.student_usn,
+                "event_title": r.event_title,
                 "category": r.category,
                 "title": r.event_title or "Event",
                 "submittedOn": r.issued_at.isoformat() if r.issued_at else None,

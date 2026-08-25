@@ -281,10 +281,6 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
                 points_awarded = int(units * points_per_unit)
                 if max_points > 0:
                     points_awarded = min(points_awarded, max_points)
-            if points_awarded <= 0 and points_per_unit > 0:
-                points_awarded = points_per_unit
-                if max_points > 0:
-                    points_awarded = min(points_awarded, max_points)
  
         # ── Enrichment: prefer live event data, fall back to session fields ──
         event_title = (
