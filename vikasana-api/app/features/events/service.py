@@ -32,7 +32,13 @@ import uuid
 from fastapi import UploadFile
 from app.core.minio_client import get_minio, ensure_bucket, get_presigned_url
 
-from app.features.events.models import Event, EventSubmission, EventSubmissionPhoto
+from app.features.events.models import (
+    Event,
+    EventSubmission,
+    EventSubmissionPhoto,
+    EventParticipant,
+    EventParticipantImportBatch,
+)
 from app.features.students.models import Student, StudentPushDevice
 import boto3
 from botocore.config import Config
@@ -2816,6 +2822,35 @@ async def delete_event(db: AsyncSession, event_id: int) -> None:
 
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
+
+    # Imported participant history is permanent event history.
+    #
+    # Stop before deleting certificates, photos or submissions.
+    # The database also uses ON DELETE RESTRICT as a final safeguard.
+    participant_history_result = await db.execute(
+        select(EventParticipant.id)
+        .where(EventParticipant.event_id == event_id)
+        .limit(1)
+    )
+
+    import_batch_result = await db.execute(
+        select(EventParticipantImportBatch.id)
+        .where(EventParticipantImportBatch.event_id == event_id)
+        .limit(1)
+    )
+
+    if (
+        participant_history_result.scalar_one_or_none() is not None
+        or import_batch_result.scalar_one_or_none() is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Event cannot be permanently deleted because "
+                "participant import/history records exist. "
+                "End or deactivate the event instead."
+            ),
+        )
 
     try:
         # 1. Get all submissions for this event

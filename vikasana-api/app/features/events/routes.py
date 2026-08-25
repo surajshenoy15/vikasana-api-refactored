@@ -10,6 +10,26 @@ from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.features.events.role_guard import validate_event_role_access, can_student_view_event
+import datetime as participant_dt
+
+from sqlalchemy import select as participant_select
+
+from app.features.students.models import (
+    Student as ParticipantLinkStudent,
+)
+
+from app.features.events.models import (
+    EventParticipant as AdminEventParticipant,
+    ExternalParticipantLinkHistory as AdminParticipantLinkHistory,
+    EventSubmission as AdminParticipantEventSubmission,
+)
+
+
+from app.features.events.participant_import_service import (
+    parse_event_participant_csv,
+    classify_event_participant_rows,
+    persist_event_participant_import,
+)
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_student, get_current_admin
@@ -258,6 +278,785 @@ async def admin_create_event_api(
     if isinstance(created, Event):
         return _event_out_dict(created)
     return created
+
+
+@router.post(
+    "/admin/events/{event_id}/participants/preview"
+)
+async def admin_preview_event_participants_csv(
+    event_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    """
+    Read-only preview of an Admin-supplied event participant CSV.
+
+    No EventParticipant, EventSubmission, Student, points, or
+    certificate records are created or modified.
+    """
+
+    del admin
+
+    event = await db.get(
+        Event,
+        event_id,
+    )
+
+    if event is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found",
+        )
+
+    filename = str(
+        file.filename or ""
+    ).strip()
+
+    if not filename.lower().endswith(".csv"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only CSV files are allowed",
+        )
+
+    csv_bytes = await file.read()
+
+    if not csv_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail="CSV file is empty",
+        )
+
+    # Keep preview uploads bounded.
+    if len(csv_bytes) > 5 * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail="CSV file must be 5 MB or smaller",
+        )
+
+    parsed = parse_event_participant_csv(
+        csv_bytes
+    )
+
+    if not parsed.get("ok"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": (
+                    "Participant CSV could not be parsed"
+                ),
+                "errors": parsed.get(
+                    "errors",
+                    [],
+                ),
+            },
+        )
+
+    classified = (
+        await classify_event_participant_rows(
+            db,
+            parsed_csv=parsed,
+        )
+    )
+
+    return {
+        "event": {
+            "id": int(event.id),
+            "title": event.title,
+        },
+        "filename": filename,
+        **classified,
+    }
+
+
+@router.post(
+    "/admin/events/{event_id}/participants/import",
+    status_code=201,
+)
+async def admin_import_event_participants_csv(
+    event_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    """
+    Persist an Admin-managed event participant CSV import.
+
+    External participants are never converted into Student rows here.
+    """
+
+    event = await db.get(
+        Event,
+        event_id,
+    )
+
+    if event is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found",
+        )
+
+    filename = str(
+        file.filename or ""
+    ).strip()
+
+    if not filename.lower().endswith(".csv"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only CSV files are allowed",
+        )
+
+    csv_bytes = await file.read()
+
+    if not csv_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail="CSV file is empty",
+        )
+
+    if len(csv_bytes) > 5 * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail="CSV file must be 5 MB or smaller",
+        )
+
+    parsed = parse_event_participant_csv(
+        csv_bytes
+    )
+
+    if not parsed.get("ok"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": (
+                    "Participant CSV could not be parsed"
+                ),
+                "errors": parsed.get(
+                    "errors",
+                    [],
+                ),
+            },
+        )
+
+    classified = (
+        await classify_event_participant_rows(
+            db,
+            parsed_csv=parsed,
+        )
+    )
+
+    try:
+        result = await persist_event_participant_import(
+            db,
+            event_id=event_id,
+            original_filename=filename,
+            created_by_admin_id=admin.id,
+            classified=classified,
+            commit=False,
+        )
+
+        await append_audit_log(
+            db,
+            actor_type="ADMIN",
+            actor_id=admin.id,
+            actor_role=getattr(
+                admin,
+                "role",
+                "admin",
+            ),
+            actor_name=getattr(
+                admin,
+                "name",
+                None,
+            ),
+            actor_email=getattr(
+                admin,
+                "email",
+                None,
+            ),
+            action="EVENT_PARTICIPANTS_IMPORTED",
+            description=(
+                f"Admin imported participant CSV "
+                f"for event {event.title}."
+            ),
+            entity_type=(
+                "event_participant_import_batch"
+            ),
+            entity_id=result["batch_id"],
+            source="admin_web",
+            request=request,
+            metadata={
+                "event_id": event_id,
+                "event_title": event.title,
+                "filename": filename,
+                "total_rows": result[
+                    "total_rows"
+                ],
+                "linked_students": result[
+                    "linked_students"
+                ],
+                "external_created": result[
+                    "external_created"
+                ],
+                "ambiguous_rows": result[
+                    "ambiguous_rows"
+                ],
+                "duplicate_rows": result[
+                    "duplicate_rows"
+                ],
+                "invalid_rows": result[
+                    "invalid_rows"
+                ],
+                "database_duplicates": result[
+                    "database_duplicates"
+                ],
+            },
+            commit=False,
+        )
+
+        # Business data + immutable audit history succeed together.
+        await db.commit()
+
+    except Exception:
+        await db.rollback()
+        raise
+
+    return {
+        "event": {
+            "id": int(event.id),
+            "title": event.title,
+        },
+        "filename": filename,
+        **result,
+    }
+
+
+
+def _admin_event_participant_out(
+    participant,
+    student=None,
+):
+    return {
+        "id": int(participant.id),
+        "event_id": int(participant.event_id),
+
+        "student_id": (
+            int(participant.student_id)
+            if participant.student_id is not None
+            else None
+        ),
+
+        "name": participant.name_snapshot,
+        "email": participant.email_snapshot,
+        "phone": participant.phone_snapshot,
+        "usn": participant.usn_snapshot,
+        "college": (
+            participant.institution_name_snapshot
+        ),
+
+        "email_normalized": (
+            participant.email_normalized
+        ),
+        "phone_normalized": (
+            participant.phone_normalized
+        ),
+        "usn_normalized": (
+            participant.usn_normalized
+        ),
+        "institution_name_normalized": (
+            participant.institution_name_normalized
+        ),
+
+        "participant_type": (
+            participant.participant_type
+        ),
+        "status": participant.status,
+
+        "import_batch_id": (
+            int(participant.import_batch_id)
+            if participant.import_batch_id
+            is not None
+            else None
+        ),
+
+        "created_at": participant.created_at,
+        "linked_at": participant.linked_at,
+
+        "student": (
+            {
+                "id": int(student.id),
+                "name": student.name,
+                "usn": student.usn,
+                "email": student.email,
+                "college": student.college,
+                "branch": student.branch,
+                "is_active": bool(
+                    student.is_active
+                ),
+            }
+            if student is not None
+            else None
+        ),
+    }
+
+
+@router.get(
+    "/admin/events/{event_id}/participants",
+)
+async def admin_list_event_participants(
+    event_id: int,
+    status: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    """
+    List Admin-managed participant identities for one Event.
+
+    Supports optional status filtering:
+    ACTIVE / LINKED / REVIEW_REQUIRED / INACTIVE.
+    """
+
+    event = await db.get(
+        Event,
+        event_id,
+    )
+
+    if event is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found",
+        )
+
+    stmt = (
+        participant_select(
+            AdminEventParticipant,
+            ParticipantLinkStudent,
+        )
+        .outerjoin(
+            ParticipantLinkStudent,
+            ParticipantLinkStudent.id
+            == AdminEventParticipant.student_id,
+        )
+        .where(
+            AdminEventParticipant.event_id
+            == int(event_id)
+        )
+        .order_by(
+            AdminEventParticipant.id.asc()
+        )
+    )
+
+    if status and status.strip():
+        normalized_status = (
+            status.strip().upper()
+        )
+
+        if normalized_status not in {
+            "ACTIVE",
+            "LINKED",
+            "REVIEW_REQUIRED",
+            "INACTIVE",
+        }:
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid participant status",
+            )
+
+        stmt = stmt.where(
+            AdminEventParticipant.status
+            == normalized_status
+        )
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    items = [
+        _admin_event_participant_out(
+            participant,
+            student,
+        )
+        for participant, student in rows
+    ]
+
+    return {
+        "event": {
+            "id": int(event.id),
+            "title": event.title,
+        },
+        "total": len(items),
+        "items": items,
+    }
+
+
+@router.post(
+    "/admin/events/{event_id}/participants/{participant_id}/link",
+)
+async def admin_link_event_participant_to_student(
+    event_id: int,
+    participant_id: int,
+    payload: dict,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    """
+    Explicit Admin-confirmed participant -> Student link.
+
+    This endpoint never performs fuzzy/name matching.
+    """
+
+    raw_student_id = payload.get(
+        "student_id"
+    )
+
+    try:
+        student_id = int(raw_student_id)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail="student_id must be an integer",
+        )
+
+    event = await db.get(
+        Event,
+        event_id,
+    )
+
+    if event is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found",
+        )
+
+    participant_result = await db.execute(
+        participant_select(
+            AdminEventParticipant
+        )
+        .where(
+            AdminEventParticipant.id
+            == int(participant_id),
+            AdminEventParticipant.event_id
+            == int(event_id),
+        )
+        .limit(1)
+    )
+
+    participant = (
+        participant_result
+        .scalar_one_or_none()
+    )
+
+    if participant is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Participant not found for this event"
+            ),
+        )
+
+    student = await db.get(
+        ParticipantLinkStudent,
+        student_id,
+    )
+
+    if (
+        student is None
+        or not bool(
+            getattr(
+                student,
+                "is_active",
+                False,
+            )
+        )
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Active Student not found",
+        )
+
+    # --------------------------------------------------------
+    # EXISTING LINK SAFETY
+    # --------------------------------------------------------
+
+    if participant.student_id is not None:
+        if (
+            int(participant.student_id)
+            == int(student.id)
+        ):
+            return {
+                "ok": True,
+                "already_linked": True,
+                "participant": (
+                    _admin_event_participant_out(
+                        participant,
+                        student,
+                    )
+                ),
+            }
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Participant is already linked to another "
+                "Student. A dedicated relink workflow is "
+                "required."
+            ),
+        )
+
+    # --------------------------------------------------------
+    # SAME EVENT + SAME STUDENT MUST REMAIN UNIQUE
+    # --------------------------------------------------------
+
+    duplicate_result = await db.execute(
+        participant_select(
+            AdminEventParticipant.id
+        )
+        .where(
+            AdminEventParticipant.event_id
+            == int(event_id),
+            AdminEventParticipant.student_id
+            == int(student.id),
+            AdminEventParticipant.id
+            != int(participant.id),
+        )
+        .limit(1)
+    )
+
+    if (
+        duplicate_result.scalar_one_or_none()
+        is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This Student is already linked to another "
+                "participant in this event."
+            ),
+        )
+
+    # --------------------------------------------------------
+    # EXISTING EXTERNAL EVENT SUBMISSION
+    # --------------------------------------------------------
+
+    submission_result = await db.execute(
+        participant_select(
+            AdminParticipantEventSubmission
+        )
+        .where(
+            AdminParticipantEventSubmission.event_id
+            == int(event_id),
+            AdminParticipantEventSubmission.event_participant_id
+            == int(participant.id),
+        )
+        .limit(1)
+    )
+
+    submission = (
+        submission_result
+        .scalar_one_or_none()
+    )
+
+    if submission is not None:
+        if (
+            submission.student_id is not None
+            and int(submission.student_id)
+            != int(student.id)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Participant submission is already owned "
+                    "by another Student."
+                ),
+            )
+
+        existing_submission_result = (
+            await db.execute(
+                participant_select(
+                    AdminParticipantEventSubmission.id
+                )
+                .where(
+                    AdminParticipantEventSubmission.event_id
+                    == int(event_id),
+                    AdminParticipantEventSubmission.student_id
+                    == int(student.id),
+                    AdminParticipantEventSubmission.id
+                    != int(submission.id),
+                )
+                .limit(1)
+            )
+        )
+
+        if (
+            existing_submission_result
+            .scalar_one_or_none()
+            is not None
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This Student already has another "
+                    "submission for this event."
+                ),
+            )
+
+    now = participant_dt.datetime.now(
+        participant_dt.timezone.utc
+    )
+
+    try:
+        # ----------------------------------------------------
+        # UPDATE HISTORICAL PARTICIPANT IDENTITY
+        # ----------------------------------------------------
+
+        participant.student_id = int(
+            student.id
+        )
+        participant.participant_type = (
+            "LORAA_STUDENT"
+        )
+        participant.status = "LINKED"
+        participant.linked_at = now
+
+        # Preserve event_participant_id forever, but also attach
+        # the canonical Student when a submission already exists.
+        if submission is not None:
+            submission.student_id = int(
+                student.id
+            )
+
+        await db.flush()
+
+        # ----------------------------------------------------
+        # APPEND-ONLY LINK HISTORY
+        # ----------------------------------------------------
+
+        history = AdminParticipantLinkHistory(
+            event_participant_id=int(
+                participant.id
+            ),
+            previous_student_id=None,
+            student_id=int(
+                student.id
+            ),
+            matched_by="ADMIN_CONFIRMED",
+            linked_by_admin_id=int(
+                admin.id
+            ),
+            status="LINKED",
+            metadata_json={
+                "source": (
+                    "ADMIN_PARTICIPANT_REVIEW"
+                ),
+                "event_id": int(
+                    event_id
+                ),
+                "participant_id": int(
+                    participant.id
+                ),
+                "submission_id": (
+                    int(submission.id)
+                    if submission is not None
+                    else None
+                ),
+            },
+            linked_at=now,
+        )
+
+        db.add(history)
+
+        await db.flush()
+
+        # ----------------------------------------------------
+        # CENTRAL IMMUTABLE AUDIT LOG
+        # ----------------------------------------------------
+
+        await append_audit_log(
+            db,
+            actor_type="ADMIN",
+            actor_id=admin.id,
+            actor_role=getattr(
+                admin,
+                "role",
+                "admin",
+            ),
+            actor_name=getattr(
+                admin,
+                "name",
+                None,
+            ),
+            actor_email=getattr(
+                admin,
+                "email",
+                None,
+            ),
+            action=(
+                "EVENT_PARTICIPANT_LINKED"
+            ),
+            description=(
+                f"Admin linked event participant "
+                f"{participant.id} to Student "
+                f"{student.id} for event "
+                f"{event.title}."
+            ),
+            entity_type=(
+                "event_participant"
+            ),
+            entity_id=int(
+                participant.id
+            ),
+            source="admin_web",
+            request=request,
+            metadata={
+                "event_id": int(
+                    event_id
+                ),
+                "event_title": event.title,
+                "participant_id": int(
+                    participant.id
+                ),
+                "student_id": int(
+                    student.id
+                ),
+                "student_name": student.name,
+                "student_usn": student.usn,
+                "matched_by": (
+                    "ADMIN_CONFIRMED"
+                ),
+                "submission_id": (
+                    int(submission.id)
+                    if submission is not None
+                    else None
+                ),
+            },
+            commit=False,
+        )
+
+        await db.commit()
+
+    except HTTPException:
+        await db.rollback()
+        raise
+
+    except Exception:
+        await db.rollback()
+        raise
+
+    await db.refresh(
+        participant
+    )
+
+    return {
+        "ok": True,
+        "already_linked": False,
+        "participant": (
+            _admin_event_participant_out(
+                participant,
+                student,
+            )
+        ),
+    }
 
 
 @router.post("/admin/events/thumbnail-upload", response_model=ThumbnailUploadOut)

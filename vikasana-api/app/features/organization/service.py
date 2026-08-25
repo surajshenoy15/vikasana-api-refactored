@@ -138,6 +138,90 @@ async def get_college(
     return CollegeResponse.model_validate(college)
 
 
+async def resolve_college_scope_keys(
+    db: AsyncSession,
+    college_name: str | None,
+) -> set[str]:
+    """
+    Resolve a supplied college name into normalized matching keys.
+
+    Behavior:
+    - Canonical College name -> canonical + active aliases
+    - Active CollegeAlias -> canonical + active aliases
+    - Unknown college -> normalized supplied name only
+    - Empty value -> empty set
+
+    This helper is read-only. It never rewrites historical Student
+    college values or imported institution snapshots.
+    """
+
+    normalized_college = (
+        str(college_name or "")
+        .strip()
+        .casefold()
+    )
+
+    if not normalized_college:
+        return set()
+
+    canonical_result = await db.execute(
+        select(College).where(
+            func.lower(
+                func.trim(College.name)
+            ) == normalized_college
+        )
+    )
+
+    canonical_college = (
+        canonical_result.scalar_one_or_none()
+    )
+
+    if canonical_college is None:
+        alias_result = await db.execute(
+            select(College)
+            .join(
+                CollegeAlias,
+                CollegeAlias.college_id == College.id,
+            )
+            .where(
+                CollegeAlias.is_active.is_(True),
+                func.lower(
+                    func.trim(CollegeAlias.alias)
+                ) == normalized_college,
+            )
+        )
+
+        canonical_college = (
+            alias_result.scalars().first()
+        )
+
+    # External institutions are valid even when they have not
+    # yet been registered in the LoRaa college master.
+    if canonical_college is None:
+        return {
+            normalized_college,
+        }
+
+    aliases_result = await db.execute(
+        select(CollegeAlias.alias).where(
+            CollegeAlias.college_id
+            == canonical_college.id,
+            CollegeAlias.is_active.is_(True),
+        )
+    )
+
+    names = [
+        canonical_college.name,
+        *aliases_result.scalars().all(),
+    ]
+
+    return {
+        str(name).strip().casefold()
+        for name in names
+        if name and str(name).strip()
+    }
+
+
 async def _college_scope_names(
     db: AsyncSession,
     college: College,

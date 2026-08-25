@@ -15,7 +15,12 @@ from app.features.faculty.role_policy import (
 )
 from app.features.auth.models import Admin
 from app.features.students.models import Student, StudentType, StudentPushDevice
-from app.features.events.models import Event, EventSubmission
+from app.features.events.models import (
+    Event,
+    EventSubmission,
+    EventParticipant,
+    ExternalParticipantLinkHistory,
+)
 from app.features.certificates.models import Certificate
 import os
 from datetime import timedelta
@@ -1482,6 +1487,38 @@ async def delete_student_admin(
 
     if not s:
         raise HTTPException(status_code=404, detail="Student not found")
+
+    # Historical external-event participation must never be destroyed.
+    #
+    # Check both the current participant link and append-only link history.
+    # This also protects a Student who was linked in the past and later
+    # unlinked/relinked.
+    current_participant_result = await db.execute(
+        select(EventParticipant.id)
+        .where(EventParticipant.student_id == student_id)
+        .limit(1)
+    )
+
+    historical_link_result = await db.execute(
+        select(ExternalParticipantLinkHistory.id)
+        .where(
+            ExternalParticipantLinkHistory.student_id == student_id
+        )
+        .limit(1)
+    )
+
+    if (
+        current_participant_result.scalar_one_or_none() is not None
+        or historical_link_result.scalar_one_or_none() is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Student cannot be permanently deleted because "
+                "historical external event participation is linked "
+                "to this account. Deactivate the student instead."
+            ),
+        )
 
     try:
         # Delete linked certificates first because certificates.student_id references students.id

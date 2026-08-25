@@ -46,6 +46,10 @@ from app.features.students.models import (
     StudentType,
 )
 from app.features.certificates.models import Certificate
+from app.features.events.models import (
+    EventParticipant,
+    ExternalParticipantLinkHistory,
+)
 from app.features.organization.models import (
     Department,
     FacultyAccessHistory,
@@ -1164,6 +1168,36 @@ async def delete_website_mentor_student(
             detail=(
                 "Student is not assigned to this "
                 "Faculty/Mentor"
+            ),
+        )
+
+    # Historical external-event participation must never be destroyed.
+    current_participant_result = await db.execute(
+        select(EventParticipant.id)
+        .where(
+            EventParticipant.student_id == student_id
+        )
+        .limit(1)
+    )
+
+    historical_link_result = await db.execute(
+        select(ExternalParticipantLinkHistory.id)
+        .where(
+            ExternalParticipantLinkHistory.student_id == student_id
+        )
+        .limit(1)
+    )
+
+    if (
+        current_participant_result.scalar_one_or_none() is not None
+        or historical_link_result.scalar_one_or_none() is not None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Student cannot be permanently deleted because "
+                "historical external event participation is linked "
+                "to this account. Deactivate the student instead."
             ),
         )
 
