@@ -14,6 +14,8 @@ from app.features.students.models import Student
 from app.features.organization.models import (
     College,
     CollegeAlias,
+    Department,
+    AcademicBatch,
     FacultyAccessHistory,
 )
 from app.features.organization.service import (
@@ -1095,6 +1097,69 @@ async def delete_faculty(
         "faculty_id": faculty.id,
         "is_active": faculty.is_active,
         "activation_revoked": True,
+    }
+
+
+# =========================================================
+# FACULTY APP: ACADEMIC CONTEXT
+# GET /api/faculty/academic-context
+# =========================================================
+
+@router.get(
+    "/academic-context",
+    summary="Faculty academic context (Faculty auth)",
+)
+async def faculty_academic_context(
+    db: AsyncSession = Depends(get_db),
+    current_faculty: Faculty = Depends(get_current_faculty),
+):
+    department = None
+
+    if current_faculty.department_id is not None:
+        result = await db.execute(
+            select(Department).where(
+                Department.id == current_faculty.department_id,
+                Department.college == current_faculty.college,
+                Department.is_active.is_(True),
+            )
+        )
+
+        department_row = result.scalar_one_or_none()
+
+        if department_row is not None:
+            department = {
+                "id": department_row.id,
+                "name": department_row.name,
+                "code": department_row.code,
+            }
+
+    batch_result = await db.execute(
+        select(AcademicBatch)
+        .where(
+            AcademicBatch.college == current_faculty.college,
+            AcademicBatch.is_active.is_(True),
+        )
+        .order_by(
+            AcademicBatch.admitted_year.desc(),
+            AcademicBatch.id.desc(),
+        )
+    )
+
+    batches = batch_result.scalars().all()
+
+    return {
+        "college": current_faculty.college,
+        "department": department,
+        "batches": [
+            {
+                "id": batch.id,
+                "name": batch.name,
+                "admitted_year": batch.admitted_year,
+                "passout_year": batch.passout_year,
+                "course_duration_years": batch.course_duration_years,
+            }
+            for batch in batches
+        ],
     }
 
 
