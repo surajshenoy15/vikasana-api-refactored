@@ -31,6 +31,7 @@ from app.features.face.models import StudentFaceEmbedding, StudentFaceEnrollment
 from app.features.students.service import (
     create_student,
     create_students_from_csv,
+    convert_xlsx_to_csv_bytes,
     record_student_assignment_history,
     validate_student_academic_assignment,
 )
@@ -506,14 +507,30 @@ async def add_students_bulk(
         current_faculty
     )
 
-    if not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only .csv file is allowed")
+    filename = str(file.filename or "").strip().lower()
+
+    if not filename.endswith((".csv", ".xlsx")):
+        raise HTTPException(
+            status_code=400,
+            detail="Only .csv or .xlsx files are allowed",
+        )
 
     data = await file.read()
 
+    if filename.endswith(".xlsx"):
+        try:
+            import_bytes = convert_xlsx_to_csv_bytes(data)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=str(exc),
+            ) from exc
+    else:
+        import_bytes = data
+
     total, inserted, skipped, invalid, errors = await create_students_from_csv(
         db=db,
-        csv_bytes=data,
+        csv_bytes=import_bytes,
         skip_duplicates=skip_duplicates,
         faculty_college=current_faculty.college,
         faculty_id=current_faculty.id,
@@ -581,14 +598,30 @@ async def add_students_bulk_admin(
     db: AsyncSession = Depends(get_db),
     current_admin: Admin = Depends(get_current_admin),
 ):
-    if not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only .csv file is allowed")
+    filename = str(file.filename or "").strip().lower()
+
+    if not filename.endswith((".csv", ".xlsx")):
+        raise HTTPException(
+            status_code=400,
+            detail="Only .csv or .xlsx files are allowed",
+        )
 
     data = await file.read()
 
+    if filename.endswith(".xlsx"):
+        try:
+            import_bytes = convert_xlsx_to_csv_bytes(data)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=str(exc),
+            ) from exc
+    else:
+        import_bytes = data
+
     total, inserted, skipped, invalid, errors = await create_students_from_csv(
     db=db,
-    csv_bytes=data,
+    csv_bytes=import_bytes,
     skip_duplicates=skip_duplicates,
     faculty_college=college,
     faculty_id=None,

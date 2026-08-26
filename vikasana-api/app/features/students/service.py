@@ -5,6 +5,8 @@ import csv
 import io
 from typing import List, Tuple
 
+from openpyxl import load_workbook
+
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1208,6 +1210,77 @@ async def create_student(
     return s
 
 
+def convert_xlsx_to_csv_bytes(xlsx_bytes: bytes) -> bytes:
+    """
+    Convert the first worksheet of an .xlsx workbook into
+    UTF-8 CSV bytes.
+
+    The resulting bytes are intentionally passed through the
+    existing create_students_from_csv() pipeline so CSV and
+    Excel imports share the exact same validation, duplicate,
+    hierarchy, batch, and ownership behavior.
+    """
+    if not xlsx_bytes:
+        raise ValueError("Excel file is empty")
+
+    try:
+        workbook = load_workbook(
+            filename=io.BytesIO(xlsx_bytes),
+            read_only=True,
+            data_only=True,
+        )
+    except Exception as exc:
+        raise ValueError(
+            "Unable to read Excel file. Please upload a valid .xlsx file."
+        ) from exc
+
+    try:
+        worksheet = workbook.active
+
+        if worksheet is None:
+            raise ValueError(
+                "Excel workbook does not contain a worksheet"
+            )
+
+        output = io.StringIO(newline="")
+        writer = csv.writer(output)
+
+        row_count = 0
+
+        for excel_row in worksheet.iter_rows(values_only=True):
+            normalized_row = []
+
+            for value in excel_row:
+                if value is None:
+                    normalized_row.append("")
+                    continue
+
+                # Excel sometimes exposes whole-number cells as
+                # floats. Keep years / IDs clean (2023, not 2023.0).
+                if isinstance(value, float) and value.is_integer():
+                    value = int(value)
+
+                normalized_row.append(str(value).strip())
+
+            # Preserve the header row and meaningful data rows while
+            # ignoring completely empty trailing worksheet rows.
+            if not any(normalized_row):
+                continue
+
+            writer.writerow(normalized_row)
+            row_count += 1
+
+        if row_count == 0:
+            raise ValueError(
+                "Excel file does not contain any rows"
+            )
+
+        return output.getvalue().encode("utf-8-sig")
+
+    finally:
+        workbook.close()
+
+
 async def create_students_from_csv(
     db: AsyncSession,
     csv_bytes: bytes,
@@ -1265,7 +1338,7 @@ async def create_students_from_csv(
             0,
             0,
             [
-                "CSV has no headers. Required: "
+                "Import file has no headers. Required: "
                 "name,email,usn,branch,student_type,admitted_year,passout_year"
             ],
         )
