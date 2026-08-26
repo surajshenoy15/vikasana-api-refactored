@@ -1133,6 +1133,30 @@ async def faculty_academic_context(
                 "code": department_row.code,
             }
 
+    hod = None
+
+    if current_faculty.parent_faculty_id is not None:
+        parent_faculty = await db.get(
+            Faculty,
+            current_faculty.parent_faculty_id,
+        )
+
+        if parent_faculty is not None:
+            parent_role = str(
+                parent_faculty.role or ""
+            ).strip().lower()
+
+            if parent_role in {
+                "hod",
+                "head_of_department",
+                "head of department",
+            }:
+                hod = {
+                    "id": parent_faculty.id,
+                    "full_name": parent_faculty.full_name,
+                    "email": parent_faculty.email,
+                }
+
     batch_result = await db.execute(
         select(AcademicBatch)
         .where(
@@ -1150,6 +1174,7 @@ async def faculty_academic_context(
     return {
         "college": current_faculty.college,
         "department": department,
+        "hod": hod,
         "batches": [
             {
                 "id": batch.id,
