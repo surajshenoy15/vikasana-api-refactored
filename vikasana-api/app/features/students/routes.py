@@ -412,7 +412,16 @@ async def list_students(
         .options(selectinload(Student.created_by_faculty))
         .outerjoin(activities_sq, activities_sq.c.student_id == Student.id)
         .outerjoin(certs_sq, certs_sq.c.student_id == Student.id)
-        .where(Student.college == current_faculty.college)
+        .where(
+            Student.college == current_faculty.college,
+            or_(
+                Student.assigned_faculty_id == current_faculty.id,
+                and_(
+                    Student.assigned_faculty_id.is_(None),
+                    Student.created_by_faculty_id == current_faculty.id,
+                ),
+            ),
+        )
     )
 
     if q and q.strip():
@@ -424,29 +433,6 @@ async def list_students(
                 Student.usn.ilike(like),
                 Student.branch.ilike(like),
                 Student.email.ilike(like),
-                Department.name.ilike(like),
-                Department.code.ilike(like),
-            )
-        )
-
-    if department_id is not None:
-        stmt = stmt.where(
-            Student.department_id == department_id
-        )
-
-    if department_q and department_q.strip():
-        department_like = (
-            f"%{department_q.strip()}%"
-        )
-
-        stmt = stmt.where(
-            or_(
-                Department.name.ilike(
-                    department_like
-                ),
-                Department.code.ilike(
-                    department_like
-                ),
             )
         )
 

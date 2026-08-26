@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_, desc, delete
+from sqlalchemy import select, func, or_, and_, desc, delete
 from sqlalchemy.orm import selectinload
 import csv
 import io
@@ -64,6 +64,27 @@ from app.features.faculty.role_policy import (
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/faculty", tags=["Faculty"])
+
+
+def _faculty_student_scope(current_faculty: Faculty):
+    """
+    Regular Faculty mobile scope.
+
+    New hierarchy records use assigned_faculty_id.
+    Legacy Faculty-created students may have no explicit
+    assigned_faculty_id, so created_by_faculty_id is used
+    only when assigned_faculty_id is NULL.
+    """
+    return and_(
+        Student.college == current_faculty.college,
+        or_(
+            Student.assigned_faculty_id == current_faculty.id,
+            and_(
+                Student.assigned_faculty_id.is_(None),
+                Student.created_by_faculty_id == current_faculty.id,
+            ),
+        ),
+    )
 
 
 # =========================================================
@@ -1090,10 +1111,10 @@ async def dashboard_stats(
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),
 ):
-    student_scope = Student.college == current_faculty.college
+    student_scope = _faculty_student_scope(current_faculty)
 
     session_scope = ActivitySession.student.has(
-        Student.college == current_faculty.college
+        student_scope
     )
 
     students = await db.scalar(
@@ -1158,7 +1179,11 @@ async def list_activity_sessions(
     stmt = (
         select(ActivitySession)
         .options(selectinload(ActivitySession.student))
-        .where(ActivitySession.student.has(Student.college == current_faculty.college))
+        .where(
+            ActivitySession.student.has(
+                _faculty_student_scope(current_faculty)
+            )
+        )
         .order_by(desc(ActivitySession.created_at))
     )
 
@@ -1232,14 +1257,16 @@ async def update_activity_session_status(
     q = await db.execute(
         select(ActivitySession)
         .options(selectinload(ActivitySession.student))
-        .where(ActivitySession.id == session_id)
+        .where(
+            ActivitySession.id == session_id,
+            ActivitySession.student.has(
+                _faculty_student_scope(current_faculty)
+            ),
+        )
     )
     sess = q.scalar_one_or_none()
     if not sess:
         raise HTTPException(status_code=404, detail="Activity session not found")
-
-    if not sess.student or (sess.student.college or "") != (current_faculty.college or ""):
-        raise HTTPException(status_code=403, detail="Not allowed")
 
     sess.status = new_status
     await db.commit()
