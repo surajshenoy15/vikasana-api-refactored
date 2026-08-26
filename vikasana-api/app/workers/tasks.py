@@ -159,6 +159,55 @@ def run_event_reminders_task(self):
 @celery_app.task(
     bind=True,
     max_retries=2,
+    default_retry_delay=60,
+)
+def auto_finalize_ended_events_task(self):
+    """
+    Automatically finalize events whose configured end time
+    has passed.
+
+    Rules for unfinished submissions:
+    - 0 photos    -> EXPIRED
+    - >= 1 photo -> FLAGGED
+
+    No points are credited here.
+    FLAGGED submissions require admin approval/rejection.
+    """
+    try:
+        from app.core.database import AsyncSessionLocal
+        from app.features.events.service import (
+            auto_finalize_ended_events,
+        )
+
+        async def _finalize():
+            async with AsyncSessionLocal() as db:
+                return await auto_finalize_ended_events(
+                    db
+                )
+
+        result = _run_async(
+            _finalize()
+        )
+
+        print(
+            "[Event Auto Finalizer] Complete:",
+            result,
+        )
+
+        return result
+
+    except Exception as exc:
+        print(
+            "[Event Auto Finalizer] Failed:",
+            repr(exc),
+        )
+
+        raise self.retry(exc=exc)
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=2,
     default_retry_delay=120,
 )
 def check_expo_push_receipts_task(

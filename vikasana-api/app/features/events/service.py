@@ -2784,36 +2784,221 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
     }
     
 
-async def end_event(db: AsyncSession, event_id: int):
-    event = await db.get(Event, event_id)
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
+async def _finalize_unfinished_event_submissions(
+    db: AsyncSession,
+    event_id: int,
+    submitted_at: datetime | None = None,
+) -> dict:
+    """
+    Finalize unfinished submissions when an event ends.
 
-    # ✅ set inactive
-    event.is_active = False
+    Rules:
+    - 0 photos:
+        -> EXPIRED
 
-    # ✅ set end_time = NOW (IST) so window becomes correct
-    now_ist = _now_ist_aware()
-    event.end_time = now_ist.time().replace(tzinfo=None)
+    - >= 1 photo:
+        -> FLAGGED
+        -> submitted_at is recorded
+        -> points stay uncredited
+        -> admin must approve/reject
 
-    # Expire only unfinished submissions
-    await db.execute(
-        update(EventSubmission)
+    This intentionally does NOT calculate or credit points here.
+
+    On admin approval, existing scoring logic uses:
+        first captured photo -> last captured photo
+
+    for AUTO scoring, while MANUAL scoring uses the configured
+    event points only after approval.
+    """
+
+    finalized_at = submitted_at or datetime.now(timezone.utc)
+
+    unfinished_result = await db.execute(
+        select(EventSubmission)
+        .options(
+            selectinload(EventSubmission.photos),
+        )
         .where(
             EventSubmission.event_id == event_id,
-            EventSubmission.status.in_(["in_progress", "draft"]),
+            EventSubmission.status.in_(
+                ["in_progress", "draft"]
+            ),
         )
-        .values(status="expired")
+    )
+
+    unfinished_submissions = (
+        unfinished_result.scalars().unique().all()
+    )
+
+    flagged_count = 0
+    expired_count = 0
+
+    for submission in unfinished_submissions:
+        photos = list(
+            getattr(submission, "photos", None) or []
+        )
+
+        # No evidence was captured.
+        if len(photos) == 0:
+            submission.status = "expired"
+            expired_count += 1
+            continue
+
+        # Evidence exists, but the student never manually submitted.
+        # Auto-submit it for admin review.
+        submission.status = "flagged"
+        submission.submitted_at = finalized_at
+
+        # Never award points during automatic finalization.
+        submission.points_credited = False
+        submission.awarded_points = 0
+
+        # FLAGGED is a review state, not a rejection.
+        submission.rejection_reason = None
+
+        flagged_count += 1
+
+    return {
+        "unfinished_found": len(unfinished_submissions),
+        "flagged": flagged_count,
+        "expired": expired_count,
+    }
+
+
+async def end_event(db: AsyncSession, event_id: int):
+    """
+    Manually end an event immediately.
+
+    Uses the same unfinished-submission finalization rules
+    as the scheduled automatic event-end worker.
+    """
+
+    event = await db.get(Event, event_id)
+    if not event:
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found",
+        )
+
+    # End immediately.
+    event.is_active = False
+
+    now_ist = _now_ist_aware()
+    now_utc = datetime.now(timezone.utc)
+
+    # Preserve existing manual-end behaviour:
+    # event end_time becomes the moment Admin ended it.
+    event.end_time = (
+        now_ist.time().replace(tzinfo=None)
+    )
+
+    await _finalize_unfinished_event_submissions(
+        db=db,
+        event_id=event_id,
+        submitted_at=now_utc,
     )
 
     await db.commit()
     await db.refresh(event)
 
-    # ✅ clear cached event lists
     await cache_delete_pattern("admin:events:*")
     await cache_delete_pattern("student:events:*")
 
     return event
+
+
+async def auto_finalize_ended_events(
+    db: AsyncSession,
+) -> dict:
+    """
+    Find active events whose configured event window has ended
+    and automatically finalize their unfinished submissions.
+
+    Intended to be called periodically by Celery Beat.
+    """
+
+    now_utc = datetime.now(timezone.utc)
+
+    summary = {
+        "checked_at": now_utc.isoformat(),
+        "events_checked": 0,
+        "events_finalized": 0,
+        "submissions_flagged": 0,
+        "submissions_expired": 0,
+        "errors": [],
+    }
+
+    result = await db.execute(
+        select(Event)
+        .where(
+            Event.is_active.is_(True),
+            Event.event_date.is_not(None),
+            Event.start_time.is_not(None),
+        )
+        .order_by(
+            Event.event_date.asc(),
+            Event.start_time.asc(),
+        )
+    )
+
+    events = list(result.scalars().all())
+
+    summary["events_checked"] = len(events)
+
+    changed = False
+
+    for event in events:
+        try:
+            _, event_end_utc = _event_window_utc(event)
+        except Exception as exc:
+            summary["errors"].append(
+                {
+                    "event_id": event.id,
+                    "error": (
+                        "invalid_event_window: "
+                        f"{str(exc)}"
+                    ),
+                }
+            )
+            continue
+
+        # Event is still running.
+        if now_utc < event_end_utc:
+            continue
+
+        counts = (
+            await _finalize_unfinished_event_submissions(
+                db=db,
+                event_id=event.id,
+                # Record the configured event-end instant,
+                # not the Celery worker's few-minutes-later run time.
+                submitted_at=event_end_utc,
+            )
+        )
+
+        event.is_active = False
+
+        summary["events_finalized"] += 1
+        summary["submissions_flagged"] += int(
+            counts["flagged"]
+        )
+        summary["submissions_expired"] += int(
+            counts["expired"]
+        )
+
+        changed = True
+
+    if changed:
+        await db.commit()
+
+        await cache_delete_pattern(
+            "admin:events:*"
+        )
+        await cache_delete_pattern(
+            "student:events:*"
+        )
+
+    return summary
 
 
 async def delete_event(db: AsyncSession, event_id: int) -> None:
@@ -2932,8 +3117,11 @@ async def approve_submission(db: AsyncSession, submission_id: int):
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    if submission.status != "submitted":
-        raise HTTPException(status_code=400, detail="Only submitted items can be approved")
+    if submission.status not in ("submitted", "flagged"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only submitted or flagged items can be approved",
+        )
 
     event = await db.get(Event, submission.event_id)
     if not event:
@@ -2990,8 +3178,11 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    if submission.status != "submitted":
-        raise HTTPException(status_code=400, detail="Only submitted items can be rejected")
+    if submission.status not in ("submitted", "flagged"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only submitted or flagged items can be rejected",
+        )
 
     submission.status = "rejected"
     if hasattr(submission, "rejection_reason"):

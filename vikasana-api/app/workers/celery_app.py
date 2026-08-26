@@ -26,6 +26,14 @@ celery_app.conf.update(
             ),
             "schedule": 300.0,
         },
+
+        "auto-finalize-ended-events-every-5-minutes": {
+            "task": (
+                "app.workers.tasks."
+                "auto_finalize_ended_events_task"
+            ),
+            "schedule": 300.0,
+        },
     },
 )
 
