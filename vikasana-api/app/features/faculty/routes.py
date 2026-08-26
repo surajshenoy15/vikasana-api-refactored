@@ -1082,24 +1082,65 @@ async def delete_faculty(
 # GET /api/faculty/dashboard/stats
 # =========================================================
 
-@router.get("/dashboard/stats", summary="Faculty dashboard stats (Faculty auth)")
+@router.get(
+    "/dashboard/stats",
+    summary="Faculty dashboard stats (Faculty auth)",
+)
 async def dashboard_stats(
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),
 ):
+    student_scope = Student.college == current_faculty.college
+
+    session_scope = ActivitySession.student.has(
+        Student.college == current_faculty.college
+    )
+
     students = await db.scalar(
         select(func.count())
         .select_from(Student)
-        .where(Student.college == current_faculty.college)
+        .where(student_scope)
+    )
+
+    verified = await db.scalar(
+        select(func.count())
+        .select_from(ActivitySession)
+        .where(
+            session_scope,
+            ActivitySession.status == ActivitySessionStatus.APPROVED,
+        )
+    )
+
+    pending = await db.scalar(
+        select(func.count())
+        .select_from(ActivitySession)
+        .where(
+            session_scope,
+            ActivitySession.status.in_(
+                [
+                    ActivitySessionStatus.DRAFT,
+                    ActivitySessionStatus.SUBMITTED,
+                    ActivitySessionStatus.FLAGGED,
+                ]
+            ),
+        )
+    )
+
+    rejected = await db.scalar(
+        select(func.count())
+        .select_from(ActivitySession)
+        .where(
+            session_scope,
+            ActivitySession.status == ActivitySessionStatus.REJECTED,
+        )
     )
 
     return {
         "students": int(students or 0),
-        "verified": 0,
-        "pending": 0,
-        "rejected": 0,
+        "verified": int(verified or 0),
+        "pending": int(pending or 0),
+        "rejected": int(rejected or 0),
     }
-
 
 # =========================================================
 # FACULTY APP: LIST ACTIVITY SESSIONS
