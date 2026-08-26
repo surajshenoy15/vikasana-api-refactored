@@ -9,6 +9,63 @@ from pydantic import (
 
 
 # =========================================================
+# BATCH CREATION
+# =========================================================
+
+
+class WebsiteBatchCreateRequest(BaseModel):
+    """
+    College Coordinator creates one college-wide academic batch.
+
+    The client supplies only:
+        admitted_year
+        course_duration_years
+
+    College, passout year and batch name are server-derived.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+
+    admitted_year: int = Field(
+        ge=2000,
+        le=2200,
+    )
+
+    course_duration_years: int = Field(
+        default=4,
+        ge=1,
+        le=8,
+    )
+
+
+class WebsiteBatchCreateResponse(BaseModel):
+    batch_id: int = Field(
+        ge=1,
+    )
+
+    name: str
+
+    admitted_year: int = Field(
+        ge=2000,
+        le=2200,
+    )
+
+    passout_year: int = Field(
+        ge=2001,
+        le=2208,
+    )
+
+    course_duration_years: int = Field(
+        ge=1,
+        le=8,
+    )
+
+    is_active: bool
+
+
+# =========================================================
 # BATCH MANAGEMENT - READ MODELS
 # =========================================================
 

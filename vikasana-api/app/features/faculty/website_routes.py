@@ -84,6 +84,7 @@ from app.features.faculty.website_batch_purge_service import (
 
 from app.features.faculty.website_batch_management_service import (
     archive_website_batch_graduated_students,
+    create_website_academic_batch,
     graduate_website_batch_final_year,
     list_website_batch_students,
     list_website_batch_summaries,
@@ -100,6 +101,8 @@ from app.features.faculty.schemas.website_dashboard import (
 )
 from app.features.faculty.schemas.website_batch_management import (
     WebsiteBatchArchivePreview,
+    WebsiteBatchCreateRequest,
+    WebsiteBatchCreateResponse,
     WebsiteBatchPurgePreview,
     WebsiteBatchPurgeRequest,
     WebsiteBatchPurgeJobResponse,
@@ -1440,6 +1443,71 @@ async def delete_website_mentor_student(
 # =========================================================
 # BATCH MANAGEMENT - READ ONLY
 # =========================================================
+
+
+@router.post(
+    "/batches",
+    response_model=WebsiteBatchCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create college-wide academic batch",
+)
+async def create_website_faculty_batch(
+    payload: WebsiteBatchCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> WebsiteBatchCreateResponse:
+    """
+    Create one college-wide academic batch.
+
+    College Coordinator:
+        allowed.
+
+    HOD:
+        forbidden.
+
+    College is always derived from the authenticated scope.
+    """
+
+    try:
+        result = await create_website_academic_batch(
+            db=db,
+            scope=scope,
+            payload=payload,
+        )
+
+        await db.commit()
+
+        return result
+
+    except PermissionError as exc:
+        await db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        await db.rollback()
+
+        message = str(
+            exc
+        )
+
+        if (
+            "already exists"
+            in message.lower()
+        ):
+            code = status.HTTP_409_CONFLICT
+        else:
+            code = status.HTTP_400_BAD_REQUEST
+
+        raise HTTPException(
+            status_code=code,
+            detail=message,
+        ) from exc
 
 
 @router.get(

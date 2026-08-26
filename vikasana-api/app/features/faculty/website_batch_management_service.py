@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from fastapi import Request
 from sqlalchemy import and_, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
 from app.features.audit.service import append_audit_log
 from app.features.faculty.models import Faculty
@@ -16,6 +17,8 @@ from app.features.faculty.permission_scope import (
 )
 from app.features.faculty.schemas.website_batch_management import (
     WebsiteBatchArchivePreview,
+    WebsiteBatchCreateRequest,
+    WebsiteBatchCreateResponse,
     WebsiteBatchArchiveRequest,
     WebsiteBatchArchiveResponse,
     WebsiteBatchGraduateRequest,
@@ -57,6 +60,185 @@ ARCHIVE_CHUNK_SIZE = 500
 
 def _normalized_college_key(value: str) -> str:
     return str(value or "").strip().casefold()
+
+
+# =========================================================
+# CREATE COLLEGE-WIDE ACADEMIC BATCH
+# =========================================================
+
+
+async def create_website_academic_batch(
+    *,
+    db: AsyncSession,
+    scope: WebsiteFacultyScope,
+    payload: WebsiteBatchCreateRequest,
+) -> WebsiteBatchCreateResponse:
+    """
+    Create one college-wide AcademicBatch.
+
+    Authorization:
+        College Coordinator only.
+
+    HODs consume the same batch but cannot create it.
+
+    The client cannot choose:
+        college
+        passout_year
+        name
+        department
+
+    Those values are server-derived.
+    """
+
+    if (
+        str(scope.role)
+        != ROLE_COLLEGE_COORDINATOR
+    ):
+        raise PermissionError(
+            "Only the College Coordinator can create academic batches"
+        )
+
+    college = str(
+        scope.college or ""
+    ).strip()
+
+    if not college:
+        raise ValueError(
+            "Authenticated college is missing"
+        )
+
+    admitted_year = int(
+        payload.admitted_year
+    )
+
+    duration = int(
+        payload.course_duration_years
+    )
+
+    passout_year = (
+        admitted_year
+        + duration
+    )
+
+    # Use an en dash for the human-readable academic batch label.
+    name = (
+        f"{admitted_year}"
+        f"–"
+        f"{passout_year}"
+    )
+
+    college_key = (
+        _normalized_college_key(
+            college
+        )
+    )
+
+    # Friendly application-level duplicate check.
+    existing = (
+        await db.execute(
+            select(
+                AcademicBatch.id
+            )
+            .where(
+                func.lower(
+                    func.trim(
+                        AcademicBatch.college
+                    )
+                )
+                == college_key,
+
+                AcademicBatch.admitted_year
+                == admitted_year,
+
+                AcademicBatch.passout_year
+                == passout_year,
+
+                AcademicBatch.course_duration_years
+                == duration,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    if existing is not None:
+        raise ValueError(
+            "An academic batch with the same years "
+            "and course duration already exists"
+        )
+
+    batch = AcademicBatch(
+        college=college,
+        name=name,
+        admitted_year=admitted_year,
+        passout_year=passout_year,
+        course_duration_years=duration,
+        is_active=True,
+        created_by_faculty_id=int(
+            scope.faculty_id
+        ),
+        created_by_admin_id=None,
+    )
+
+    db.add(
+        batch
+    )
+
+    try:
+        # Flush first so batch.id exists for the immutable audit log.
+        # The route owns the final commit.
+        await db.flush()
+
+    except IntegrityError as exc:
+        await db.rollback()
+
+        raise ValueError(
+            "An academic batch with the same years "
+            "and course duration already exists"
+        ) from exc
+
+    audit = await append_audit_log(
+        db,
+        actor_type="COLLEGE_COORDINATOR",
+        actor_id=int(
+            scope.faculty_id
+        ),
+        actor_role=ROLE_COLLEGE_COORDINATOR,
+        college=college,
+        department_id=None,
+        action="ACADEMIC_BATCH_CREATED",
+        description=(
+            f"Created academic batch {name}"
+        ),
+        entity_type="academic_batch",
+        entity_id=int(
+            batch.id
+        ),
+        source="website_batch_management",
+        metadata={
+            "batch_id": int(
+                batch.id
+            ),
+            "name": name,
+            "admitted_year": admitted_year,
+            "passout_year": passout_year,
+            "course_duration_years": duration,
+        },
+        commit=False,
+    )
+
+    # Make explicit that audit creation occurred before commit.
+    _ = audit
+
+    return WebsiteBatchCreateResponse(
+        batch_id=int(
+            batch.id
+        ),
+        name=name,
+        admitted_year=admitted_year,
+        passout_year=passout_year,
+        course_duration_years=duration,
+        is_active=True,
+    )
 
 
 # =========================================================
