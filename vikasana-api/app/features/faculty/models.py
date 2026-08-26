@@ -164,10 +164,6 @@ class Faculty(Base):
 
     __table_args__ = (
         Index(
-            "ix_faculty_email",
-            "email",
-        ),
-        Index(
             "ix_faculty_college_department_role",
             "college",
             "department_id",

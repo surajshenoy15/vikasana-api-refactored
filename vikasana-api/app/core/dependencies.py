@@ -203,6 +203,40 @@ async def get_current_enabled_website_faculty_scope(
     return scope
 
 
+def _get_student_lifecycle_status(
+    student: Student,
+) -> str:
+    """
+    Return normalized Student lifecycle status.
+
+    Backward compatibility:
+    rows/models without lifecycle_status are treated as ACTIVE.
+    Handles plain strings and Enum-like values.
+    """
+
+    value = getattr(
+        student,
+        "lifecycle_status",
+        "ACTIVE",
+    )
+
+    enum_value = getattr(
+        value,
+        "value",
+        value,
+    )
+
+    normalized = str(
+        enum_value
+        or "ACTIVE"
+    ).strip().upper()
+
+    return (
+        normalized
+        or "ACTIVE"
+    )
+
+
 async def get_current_student(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
     db: AsyncSession = Depends(get_db),
@@ -264,7 +298,71 @@ async def get_current_student(
             detail="This student account has been deactivated",
         )
 
+    lifecycle_status = (
+        _get_student_lifecycle_status(
+            student
+        )
+    )
+
+    if lifecycle_status in {
+        "ARCHIVED",
+        "PURGED",
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "This student record is no longer available "
+                "for student portal access"
+            ),
+        )
+
+    # ACTIVE and GRADUATED students may authenticate.
+    #
+    # GRADUATED students retain read access to their
+    # profile, history and certificates.
+    #
+    # Operational writes use get_current_active_student.
+
     # ✅ SaaS college-wide access control
     await ensure_college_is_active(db, student.college)
+
+    return student
+
+async def get_current_active_student(
+    student: Student = Depends(
+        get_current_student
+    ),
+) -> Student:
+    """
+    Require an academically ACTIVE Student.
+
+    Use this dependency for operations that create or mutate
+    operational student activity data.
+
+    ACTIVE:
+        write access allowed.
+
+    GRADUATED:
+        authenticated read access remains available through
+        get_current_student, but activity writes are blocked.
+
+    ARCHIVED / PURGED:
+        already rejected by get_current_student.
+    """
+
+    lifecycle_status = (
+        _get_student_lifecycle_status(
+            student
+        )
+    )
+
+    if lifecycle_status != "ACTIVE":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "This student has completed the active academic "
+                "lifecycle and cannot create or modify activities"
+            ),
+        )
 
     return student

@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import List, Optional, TYPE_CHECKING
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -880,5 +881,715 @@ class StudentFacultyAssignment(Base):
         Index(
             "ix_student_faculty_assignments_assigned_faculty",
             "assigned_faculty_id",
+        ),
+    )
+
+
+# --------------------------------------------------
+# BATCH FINAL EXPORT JOB
+# --------------------------------------------------
+
+
+class BatchExportJob(Base):
+    """
+    Durable metadata for one final academic-batch export.
+
+    The ZIP itself belongs in MinIO / AWS S3.
+
+    This row stores:
+    - immutable export scope
+    - storage location
+    - SHA-256 integrity evidence
+    - exported row counts
+    - verification timestamp
+
+    A verified export is the future prerequisite for:
+
+        GRADUATED -> ARCHIVED
+
+    This model never represents Student deletion or purge.
+    """
+
+    __tablename__ = "batch_export_jobs"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    batch_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "academic_batches.id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+
+    # Historical organization snapshot.
+    college: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    # NULL only for a College Coordinator whole-college export.
+    department_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "departments.id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+
+    # Matches FacultyScopeType.value:
+    #     college
+    #     department
+    scope_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+    )
+
+    # SET NULL preserves the export record if the Faculty account
+    # is ever removed.
+    requested_by_faculty_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="PENDING",
+        server_default=text(
+            "'PENDING'"
+        ),
+    )
+
+    # =====================================================
+    # OBJECT STORAGE
+    # =====================================================
+
+    storage_provider: Mapped[Optional[str]] = mapped_column(
+        String(20),
+        nullable=True,
+    )
+
+    bucket: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    object_key: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    sha256: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    file_size_bytes: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+
+    # =====================================================
+    # EXPORTED ROW ACCOUNTING
+    # =====================================================
+
+    students_rows: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    academic_history_rows: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    activity_records_rows: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    activity_points_rows: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    event_participation_rows: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    certificates_rows: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    # =====================================================
+    # PROCESS STATE / VERIFICATION
+    # =====================================================
+
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # IMPORTANT:
+    # Archive must later require verified_at IS NOT NULL.
+    #
+    # Merely having status=COMPLETED is not sufficient.
+    verified_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    failure_reason: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            """
+            scope_type IN (
+                'college',
+                'department'
+            )
+            """,
+            name="ck_batch_export_jobs_scope_type",
+        ),
+
+        CheckConstraint(
+            """
+            (
+                scope_type = 'college'
+                AND department_id IS NULL
+            )
+            OR
+            (
+                scope_type = 'department'
+                AND department_id IS NOT NULL
+            )
+            """,
+            name="ck_batch_export_jobs_scope_department",
+        ),
+
+        CheckConstraint(
+            """
+            status IN (
+                'PENDING',
+                'PROCESSING',
+                'COMPLETED',
+                'FAILED'
+            )
+            """,
+            name="ck_batch_export_jobs_status",
+        ),
+
+        CheckConstraint(
+            """
+            students_rows >= 0
+            AND academic_history_rows >= 0
+            AND activity_records_rows >= 0
+            AND activity_points_rows >= 0
+            AND event_participation_rows >= 0
+            AND certificates_rows >= 0
+            """,
+            name="ck_batch_export_jobs_row_counts",
+        ),
+
+        CheckConstraint(
+            """
+            file_size_bytes IS NULL
+            OR file_size_bytes >= 0
+            """,
+            name="ck_batch_export_jobs_file_size",
+        ),
+
+        # A completed export must have durable integrity metadata.
+        CheckConstraint(
+            """
+            status <> 'COMPLETED'
+            OR (
+                storage_provider IS NOT NULL
+                AND bucket IS NOT NULL
+                AND object_key IS NOT NULL
+                AND sha256 IS NOT NULL
+                AND file_size_bytes IS NOT NULL
+                AND completed_at IS NOT NULL
+            )
+            """,
+            name="ck_batch_export_jobs_completed_metadata",
+        ),
+
+        # Verification can only exist for a completed export.
+        CheckConstraint(
+            """
+            verified_at IS NULL
+            OR status = 'COMPLETED'
+            """,
+            name="ck_batch_export_jobs_verified_status",
+        ),
+
+        Index(
+            "ix_batch_export_jobs_batch_scope_status_created",
+            "batch_id",
+            "scope_type",
+            "department_id",
+            "status",
+            "created_at",
+        ),
+
+        Index(
+            "ix_batch_export_jobs_verified_gate",
+            "batch_id",
+            "scope_type",
+            "department_id",
+            "verified_at",
+        ),
+    )
+
+
+# --------------------------------------------------
+# BATCH PURGE JOB
+# --------------------------------------------------
+
+
+class BatchPurgeJob(Base):
+    """
+    Durable metadata for one academic-batch purge operation.
+
+    Purge lifecycle:
+
+        ARCHIVED -> PURGED
+
+    Important:
+    - Student identity rows remain.
+    - Certificates remain.
+    - EventSubmission rows remain.
+    - EventParticipant/history rows remain.
+    - StudentAcademicHistory remains.
+    - immutable AuditLog rows remain.
+    - BatchExportJob evidence remains.
+
+    Only explicitly approved heavy / operational records may be
+    physically removed by the future purge worker.
+
+    This model itself performs no purge.
+    """
+
+    __tablename__ = "batch_purge_jobs"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    batch_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "academic_batches.id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+
+    # Historical organization snapshot.
+    college: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    # NULL only for College Coordinator scope.
+    department_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "departments.id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+
+    scope_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+    )
+
+    # Exact verified export used as purge evidence.
+    export_job_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "batch_export_jobs.id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+
+    requested_by_faculty_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "faculty.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    reason: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="PENDING",
+        server_default=text(
+            "'PENDING'"
+        ),
+    )
+
+    # =====================================================
+    # STUDENT ACCOUNTING
+    # =====================================================
+
+    students_targeted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    students_purged: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    # =====================================================
+    # DATABASE ROW ACCOUNTING
+    # =====================================================
+
+    activity_sessions_deleted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    activity_photos_deleted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    activity_face_checks_deleted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    event_submission_photos_deleted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    face_embeddings_deleted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    face_enrollment_images_deleted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    push_devices_deleted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    notification_deliveries_deleted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    event_role_assignments_deleted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    faculty_assignments_deleted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    activity_progress_deleted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    activity_stats_deleted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    point_adjustments_deleted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    # =====================================================
+    # STORAGE ACCOUNTING
+    # =====================================================
+
+    storage_objects_targeted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    storage_objects_deleted: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    ignored_storage_metadata: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    unsafe_storage_references: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    # =====================================================
+    # DURABLE PROCESS CHECKPOINTS
+    # =====================================================
+
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Set only after all validated object-storage deletion work
+    # has completed successfully.
+    storage_completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Set only after operational PostgreSQL cleanup and
+    # ARCHIVED -> PURGED transitions have completed.
+    database_completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    failure_reason: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            """
+            scope_type IN (
+                'college',
+                'department'
+            )
+            """,
+            name="ck_batch_purge_jobs_scope_type",
+        ),
+
+        CheckConstraint(
+            """
+            (
+                scope_type = 'college'
+                AND department_id IS NULL
+            )
+            OR
+            (
+                scope_type = 'department'
+                AND department_id IS NOT NULL
+            )
+            """,
+            name="ck_batch_purge_jobs_scope_department",
+        ),
+
+        CheckConstraint(
+            """
+            status IN (
+                'PENDING',
+                'PROCESSING',
+                'COMPLETED',
+                'FAILED'
+            )
+            """,
+            name="ck_batch_purge_jobs_status",
+        ),
+
+        CheckConstraint(
+            """
+            students_targeted >= 0
+            AND students_purged >= 0
+
+            AND activity_sessions_deleted >= 0
+            AND activity_photos_deleted >= 0
+            AND activity_face_checks_deleted >= 0
+            AND event_submission_photos_deleted >= 0
+
+            AND face_embeddings_deleted >= 0
+            AND face_enrollment_images_deleted >= 0
+
+            AND push_devices_deleted >= 0
+            AND notification_deliveries_deleted >= 0
+
+            AND event_role_assignments_deleted >= 0
+            AND faculty_assignments_deleted >= 0
+
+            AND activity_progress_deleted >= 0
+            AND activity_stats_deleted >= 0
+            AND point_adjustments_deleted >= 0
+
+            AND storage_objects_targeted >= 0
+            AND storage_objects_deleted >= 0
+            AND ignored_storage_metadata >= 0
+            AND unsafe_storage_references >= 0
+            """,
+            name="ck_batch_purge_jobs_counts",
+        ),
+
+        CheckConstraint(
+            """
+            students_purged <= students_targeted
+            """,
+            name="ck_batch_purge_jobs_student_counts",
+        ),
+
+        CheckConstraint(
+            """
+            storage_objects_deleted
+            <= storage_objects_targeted
+            """,
+            name="ck_batch_purge_jobs_storage_counts",
+        ),
+
+        CheckConstraint(
+            """
+            status <> 'COMPLETED'
+            OR (
+                started_at IS NOT NULL
+                AND storage_completed_at IS NOT NULL
+                AND database_completed_at IS NOT NULL
+                AND completed_at IS NOT NULL
+                AND unsafe_storage_references = 0
+                AND students_purged = students_targeted
+            )
+            """,
+            name="ck_batch_purge_jobs_completed_state",
+        ),
+
+        Index(
+            "ix_batch_purge_jobs_batch_scope_status_created",
+            "batch_id",
+            "scope_type",
+            "department_id",
+            "status",
+            "created_at",
+        ),
+
+        Index(
+            "ix_batch_purge_jobs_export_job",
+            "export_job_id",
+            "created_at",
         ),
     )

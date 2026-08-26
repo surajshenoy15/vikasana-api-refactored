@@ -50,6 +50,13 @@ class StudentType(str, Enum):
     DIPLOMA = "DIPLOMA"
 
 
+class StudentLifecycleStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    GRADUATED = "GRADUATED"
+    ARCHIVED = "ARCHIVED"
+    PURGED = "PURGED"
+
+
 # --------------------------------------------------
 # MODEL
 # --------------------------------------------------
@@ -72,6 +79,17 @@ class Student(Base):
         CheckConstraint(
             "current_year IS NULL OR current_year BETWEEN 1 AND 8",
             name="ck_students_current_year",
+        ),
+        CheckConstraint(
+            """
+            lifecycle_status IN (
+                'ACTIVE',
+                'GRADUATED',
+                'ARCHIVED',
+                'PURGED'
+            )
+            """,
+            name="ck_students_lifecycle_status",
         ),
         Index(
             "ix_students_college_branch",
@@ -146,6 +164,45 @@ class Student(Base):
         default=True,
         server_default="true",
         index=True,
+    )
+
+    # --------------------------------------------------
+    # ACADEMIC LIFECYCLE
+    # --------------------------------------------------
+    #
+    # lifecycle_status is independent from the legacy
+    # is_active flag.
+    #
+    # is_active:
+    #     existing account / soft-delete behavior.
+    #
+    # lifecycle_status:
+    #     ACTIVE -> GRADUATED -> ARCHIVED -> PURGED
+    #
+    # PURGED means heavy operational records were removed
+    # after verified export. The Student identity row remains.
+    # --------------------------------------------------
+
+    lifecycle_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=StudentLifecycleStatus.ACTIVE.value,
+        server_default=StudentLifecycleStatus.ACTIVE.value,
+    )
+
+    graduated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    archived_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    purged_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     # --------------------------------------------------
@@ -345,6 +402,108 @@ class Student(Base):
         back_populates="student",
         cascade="all, delete-orphan",
     )
+
+
+# --------------------------------------------------
+# STUDENT SCOPE / BATCH-YEAR QUERY INDEXES
+# --------------------------------------------------
+#
+# These indexes match the authorization predicates used by the
+# Website Faculty batch-management queries.
+#
+# College Coordinator:
+#   lower(trim(college))
+#   + batch_id
+#   + current_year
+#   + is_active
+#   + id cursor
+#
+# HOD:
+#   lower(trim(college))
+#   + department_id
+#   + batch_id
+#   + current_year
+#   + is_active
+#   + id cursor
+#
+# They are declared after Student so SQLAlchemy can use the mapped
+# columns directly in the functional index expression.
+# --------------------------------------------------
+
+
+Index(
+    "ix_students_scope_batch_year_active_id",
+    func.lower(
+        func.trim(
+            Student.college
+        )
+    ),
+    Student.batch_id,
+    Student.current_year,
+    Student.is_active,
+    Student.id,
+)
+
+
+Index(
+    "ix_students_scope_department_batch_year_active_id",
+    func.lower(
+        func.trim(
+            Student.college
+        )
+    ),
+    Student.department_id,
+    Student.batch_id,
+    Student.current_year,
+    Student.is_active,
+    Student.id,
+)
+
+
+# --------------------------------------------------
+# STUDENT LIFECYCLE QUERY INDEXES
+# --------------------------------------------------
+#
+# College Coordinator:
+#   normalized college
+#   + batch
+#   + lifecycle
+#   + Student.id cursor
+#
+# HOD:
+#   normalized college
+#   + department
+#   + batch
+#   + lifecycle
+#   + Student.id cursor
+# --------------------------------------------------
+
+
+Index(
+    "ix_students_scope_batch_lifecycle_id",
+    func.lower(
+        func.trim(
+            Student.college
+        )
+    ),
+    Student.batch_id,
+    Student.lifecycle_status,
+    Student.id,
+)
+
+
+Index(
+    "ix_students_scope_department_batch_lifecycle_id",
+    func.lower(
+        func.trim(
+            Student.college
+        )
+    ),
+    Student.department_id,
+    Student.batch_id,
+    Student.lifecycle_status,
+    Student.id,
+)
 
 
 # --------------------------------------------------

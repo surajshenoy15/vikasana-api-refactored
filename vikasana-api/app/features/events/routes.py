@@ -32,6 +32,7 @@ from app.features.events.participant_import_service import (
 )
 
 from app.core.database import get_db
+from app.core.dependencies import get_current_active_student
 from app.core.dependencies import get_current_student, get_current_admin
 from app.core.redis import cache_get, cache_set
 from app.core.activity_storage import upload_activity_image
@@ -1570,7 +1571,7 @@ async def register_event(
     event_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    student=Depends(get_current_student),
+    student=Depends(get_current_active_student),
 ):
     await validate_event_role_access(
         db=db,
@@ -1684,7 +1685,7 @@ async def upload_photos(
     captured_at: str | None = Form(None),
 
     db: AsyncSession = Depends(get_db),
-    student=Depends(get_current_student),
+    student=Depends(get_current_active_student),
 ):
     # Authoritative server time when the upload request reaches the API.
     # Device clock is never trusted for split-time unlocking.
@@ -1928,7 +1929,7 @@ async def submit_event(
     payload: FinalSubmitIn,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    student=Depends(get_current_student),
+    student=Depends(get_current_active_student),
 ):
     sub_res = await db.execute(
         select(EventSubmission).where(

@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from sqlalchemy import and_, delete, func, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, EmailStr
 
 from app.core.database import get_db
+from app.core.minio_client import get_presigned_url
 from app.core.dependencies import (
     get_current_enabled_website_faculty_scope,
 )
@@ -51,6 +52,8 @@ from app.features.events.models import (
     ExternalParticipantLinkHistory,
 )
 from app.features.organization.models import (
+    BatchExportJob,
+    BatchPurgeJob,
     Department,
     FacultyAccessHistory,
 )
@@ -66,10 +69,203 @@ from app.features.organization.service import (
 from app.features.faculty.dashboard_service import (
     get_website_faculty_dashboard_stats as get_scoped_dashboard_stats,
 )
+from app.features.faculty.batch_export_service import (
+    create_batch_export_job,
+    get_batch_export_job_within_scope,
+    get_latest_batch_export_job_within_scope,
+)
+
+from app.features.faculty.website_batch_purge_service import (
+    create_batch_purge_job,
+    get_batch_purge_job_within_scope,
+    get_latest_batch_purge_job_within_scope,
+    preview_website_batch_purge,
+)
+
+from app.features.faculty.website_batch_management_service import (
+    archive_website_batch_graduated_students,
+    graduate_website_batch_final_year,
+    list_website_batch_students,
+    list_website_batch_summaries,
+    move_website_student_year,
+    preview_website_batch_archive,
+    preview_website_batch_graduation,
+    preview_website_batch_year_promotion,
+    promote_entire_website_batch_year,
+    promote_selected_website_batch_students,
+)
 
 from app.features.faculty.schemas.website_dashboard import (
     WebsiteFacultyDashboardStatsOut,
 )
+from app.features.faculty.schemas.website_batch_management import (
+    WebsiteBatchArchivePreview,
+    WebsiteBatchPurgePreview,
+    WebsiteBatchPurgeRequest,
+    WebsiteBatchPurgeJobResponse,
+    WebsiteBatchArchiveRequest,
+    WebsiteBatchArchiveResponse,
+    WebsiteBatchGraduateRequest,
+    WebsiteBatchGraduationResponse,
+    WebsiteBatchGraduationPreview,
+    WebsiteBatchPromotionPreview,
+    WebsiteBatchPromotionResponse,
+    WebsiteBatchPromoteSelectedRequest,
+    WebsiteBatchPromoteYearRequest,
+    WebsiteBatchStudentPage,
+    WebsiteBatchSummary,
+    WebsiteStudentMoveYearRequest,
+    WebsiteStudentMoveYearResponse,
+    WebsiteBatchExportDownloadResponse,
+    WebsiteBatchExportJobResponse,
+)
+
+
+
+def _website_batch_export_response(
+    job: BatchExportJob,
+) -> WebsiteBatchExportJobResponse:
+    return WebsiteBatchExportJobResponse(
+        id=int(job.id),
+        batch_id=int(job.batch_id),
+        scope_type=str(job.scope_type),
+        department_id=job.department_id,
+        status=str(job.status),
+
+        students_rows=int(
+            job.students_rows or 0
+        ),
+        academic_history_rows=int(
+            job.academic_history_rows or 0
+        ),
+        activity_records_rows=int(
+            job.activity_records_rows or 0
+        ),
+        activity_points_rows=int(
+            job.activity_points_rows or 0
+        ),
+        event_participation_rows=int(
+            job.event_participation_rows or 0
+        ),
+        certificates_rows=int(
+            job.certificates_rows or 0
+        ),
+
+        file_size_bytes=job.file_size_bytes,
+        sha256=job.sha256,
+
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        verified_at=job.verified_at,
+
+        failure_reason=job.failure_reason,
+        created_at=job.created_at,
+    )
+
+
+
+def _website_batch_purge_response(
+    job: BatchPurgeJob,
+) -> WebsiteBatchPurgeJobResponse:
+    return WebsiteBatchPurgeJobResponse(
+        id=int(job.id),
+        batch_id=int(job.batch_id),
+        export_job_id=int(
+            job.export_job_id
+        ),
+
+        scope_type=str(
+            job.scope_type
+        ),
+        department_id=(
+            int(job.department_id)
+            if job.department_id is not None
+            else None
+        ),
+
+        reason=str(
+            job.reason
+        ),
+        status=str(
+            job.status
+        ),
+
+        students_targeted=int(
+            job.students_targeted or 0
+        ),
+        students_purged=int(
+            job.students_purged or 0
+        ),
+
+        activity_sessions_deleted=int(
+            job.activity_sessions_deleted or 0
+        ),
+        activity_photos_deleted=int(
+            job.activity_photos_deleted or 0
+        ),
+        activity_face_checks_deleted=int(
+            job.activity_face_checks_deleted or 0
+        ),
+        event_submission_photos_deleted=int(
+            job.event_submission_photos_deleted or 0
+        ),
+
+        face_embeddings_deleted=int(
+            job.face_embeddings_deleted or 0
+        ),
+        face_enrollment_images_deleted=int(
+            job.face_enrollment_images_deleted or 0
+        ),
+
+        push_devices_deleted=int(
+            job.push_devices_deleted or 0
+        ),
+        notification_deliveries_deleted=int(
+            job.notification_deliveries_deleted or 0
+        ),
+
+        event_role_assignments_deleted=int(
+            job.event_role_assignments_deleted or 0
+        ),
+        faculty_assignments_deleted=int(
+            job.faculty_assignments_deleted or 0
+        ),
+
+        activity_progress_deleted=int(
+            job.activity_progress_deleted or 0
+        ),
+        activity_stats_deleted=int(
+            job.activity_stats_deleted or 0
+        ),
+        point_adjustments_deleted=int(
+            job.point_adjustments_deleted or 0
+        ),
+
+        storage_objects_targeted=int(
+            job.storage_objects_targeted or 0
+        ),
+        storage_objects_deleted=int(
+            job.storage_objects_deleted or 0
+        ),
+        ignored_storage_metadata=int(
+            job.ignored_storage_metadata or 0
+        ),
+        unsafe_storage_references=int(
+            job.unsafe_storage_references or 0
+        ),
+
+        started_at=job.started_at,
+        storage_completed_at=(
+            job.storage_completed_at
+        ),
+        database_completed_at=(
+            job.database_completed_at
+        ),
+        completed_at=job.completed_at,
+
+        failure_reason=job.failure_reason,
+        created_at=job.created_at,
+    )
 
 
 router = APIRouter(
@@ -1240,6 +1436,457 @@ async def delete_website_mentor_student(
         )
 
 
+
+# =========================================================
+# BATCH MANAGEMENT - READ ONLY
+# =========================================================
+
+
+@router.get(
+    "/batches",
+    response_model=list[WebsiteBatchSummary],
+    summary="List academic batches within Website Faculty scope",
+)
+async def list_website_faculty_batches(
+    include_inactive: bool = Query(
+        default=False,
+    ),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> list[WebsiteBatchSummary]:
+    """
+    Return academic batch summaries inside the authenticated
+    Website Faculty authorization scope.
+
+    College Coordinator:
+        counts Students across the authenticated college.
+
+    HOD:
+        counts only Students belonging to the authenticated
+        HOD department.
+
+    AcademicBatch remains college-wide.
+
+    This endpoint is read-only and performs no database mutation.
+    """
+    return await list_website_batch_summaries(
+        db=db,
+        scope=scope,
+        include_inactive=include_inactive,
+    )
+
+
+@router.get(
+    "/batches/{batch_id}/students",
+    response_model=WebsiteBatchStudentPage,
+    summary="List students within an academic batch and Website Faculty scope",
+)
+async def list_website_faculty_batch_students(
+    batch_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    current_year: int | None = Query(
+        default=None,
+        ge=1,
+        le=8,
+    ),
+    is_active: bool | None = Query(
+        default=None,
+    ),
+    search: str | None = Query(
+        default=None,
+        max_length=120,
+    ),
+    cursor: int | None = Query(
+        default=None,
+        ge=1,
+    ),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=200,
+    ),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> WebsiteBatchStudentPage:
+    """
+    Return one bounded, cursor-paginated page of Students.
+
+    Authorization is derived entirely from the authenticated
+    Website Faculty scope.
+
+    College Coordinator:
+        authenticated college.
+
+    HOD:
+        authenticated college + authenticated department.
+
+    The client cannot provide or override college/department scope.
+
+    The full result set remains traversable through next_cursor,
+    while each individual request is limited to at most 200 rows.
+    """
+    try:
+        return await list_website_batch_students(
+            db=db,
+            scope=scope,
+            batch_id=batch_id,
+            current_year=current_year,
+            is_active=is_active,
+            search=search,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    except ValueError as error:
+        message = str(error)
+
+        if message == (
+            "Academic batch not found within authenticated college"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Academic batch not found",
+            ) from error
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=message,
+        ) from error
+
+
+@router.get(
+    "/batches/{batch_id}/promotion-preview",
+    response_model=WebsiteBatchPromotionPreview,
+    summary="Preview an entire-year promotion",
+)
+async def preview_website_faculty_batch_year_promotion(
+    batch_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    from_year: int = Query(
+        ...,
+        ge=1,
+        le=8,
+    ),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> WebsiteBatchPromotionPreview:
+    """
+    Return exact Student counts for the promotion confirmation
+    screen without modifying any Student records.
+    """
+    try:
+        return await preview_website_batch_year_promotion(
+            db=db,
+            scope=scope,
+            batch_id=batch_id,
+            from_year=from_year,
+        )
+
+    except ValueError as error:
+        message = str(error)
+
+        if message == (
+            "Active academic batch not found within authenticated college"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Academic batch not found",
+            ) from error
+
+        if message in {
+            "from_year exceeds the academic batch course duration",
+            "Final academic year cannot be promoted further",
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=message,
+            ) from error
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=message,
+        ) from error
+
+
+@router.patch(
+    "/batches/{batch_id}/promote-year",
+    response_model=WebsiteBatchPromotionResponse,
+    summary="Promote an entire academic year",
+)
+async def promote_entire_website_faculty_batch_year(
+    payload: WebsiteBatchPromoteYearRequest,
+    batch_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> WebsiteBatchPromotionResponse:
+    """
+    Promote every eligible active Student in the requested
+    batch/year inside the authenticated Website Faculty scope.
+
+    The frontend does not supply Student IDs.
+
+    HOD:
+        only the authenticated department.
+
+    College Coordinator:
+        the authenticated college.
+
+    Inactive Students remain unchanged.
+
+    The service processes Students in bounded internal chunks while
+    this route owns one logical transaction. Student year updates and
+    StudentAcademicHistory inserts are committed together.
+    """
+    try:
+        response = (
+            await promote_entire_website_batch_year(
+                db=db,
+                scope=scope,
+                batch_id=batch_id,
+                payload=payload,
+            )
+        )
+
+        await db.commit()
+
+        return response
+
+    except ValueError as error:
+        await db.rollback()
+
+        message = str(error)
+
+        if message == (
+            "Active academic batch not found within authenticated college"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Academic batch not found",
+            ) from error
+
+        if message in {
+            "from_year exceeds the academic batch course duration",
+            "to_year exceeds the academic batch course duration",
+            (
+                "Batch promotion must move students exactly "
+                "one academic year forward"
+            ),
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=message,
+            ) from error
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=message,
+        ) from error
+
+    except HTTPException:
+        await db.rollback()
+        raise
+
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.patch(
+    "/batches/{batch_id}/promote-selected",
+    response_model=WebsiteBatchPromotionResponse,
+    summary="Promote selected students to the next academic year",
+)
+async def promote_selected_website_faculty_batch_students(
+    payload: WebsiteBatchPromoteSelectedRequest,
+    batch_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> WebsiteBatchPromotionResponse:
+    """
+    Promote selected active Students exactly one academic year
+    forward inside the authenticated Website Faculty scope.
+
+    HOD:
+        only Students inside the authenticated department.
+
+    College Coordinator:
+        Students inside the authenticated college.
+
+    Students outside scope, in another batch, in another year,
+    or otherwise stale are skipped without leaking authorization
+    details.
+
+    Inactive scoped Students are counted but never promoted.
+
+    Student updates and StudentAcademicHistory rows are committed
+    atomically in one database transaction.
+    """
+    try:
+        response = (
+            await promote_selected_website_batch_students(
+                db=db,
+                scope=scope,
+                batch_id=batch_id,
+                payload=payload,
+            )
+        )
+
+        await db.commit()
+
+        return response
+
+    except ValueError as error:
+        await db.rollback()
+
+        message = str(error)
+
+        if message == (
+            "Active academic batch not found within authenticated college"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Academic batch not found",
+            ) from error
+
+        if message in {
+            "from_year exceeds the academic batch course duration",
+            "to_year exceeds the academic batch course duration",
+            (
+                "Batch promotion must move students exactly "
+                "one academic year forward"
+            ),
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=message,
+            ) from error
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=message,
+        ) from error
+
+    except HTTPException:
+        await db.rollback()
+        raise
+
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.patch(
+    "/batches/students/move-year",
+    response_model=WebsiteStudentMoveYearResponse,
+    summary="Manually move a scoped student to another academic year",
+)
+async def move_website_faculty_student_year(
+    payload: WebsiteStudentMoveYearRequest,
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> WebsiteStudentMoveYearResponse:
+    """
+    Promote, demote, or correct one Student's academic year.
+
+    Student lookup is by exact USN or email.
+
+    Authorization is derived exclusively from the authenticated
+    Website Faculty scope.
+
+    Only Student.current_year may change through this endpoint.
+    Department, batch, college, and assigned Faculty remain unchanged.
+
+    The Student update and StudentAcademicHistory row are committed
+    atomically in one database transaction.
+    """
+    try:
+        response = await move_website_student_year(
+            db=db,
+            scope=scope,
+            payload=payload,
+        )
+
+        await db.commit()
+
+        return response
+
+    except ValueError as error:
+        await db.rollback()
+
+        message = str(error)
+
+        if message == (
+            "Student not found within authenticated scope"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Student not found",
+            ) from error
+
+        if message == (
+            "Student identifier is ambiguous within authenticated scope"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Student identifier is ambiguous"
+                ),
+            ) from error
+
+        if message == (
+            "Student is already in the requested academic year"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=message,
+            ) from error
+
+        if message in {
+            "Student has no department assignment",
+            "Student has no academic batch assignment",
+            "Student has no current academic year",
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=message,
+            ) from error
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=message,
+        ) from error
+
+    except HTTPException:
+        await db.rollback()
+        raise
+
+    except Exception:
+        await db.rollback()
+        raise
+
+
 @router.get(
     "/dashboard/stats",
     response_model=WebsiteFacultyDashboardStatsOut,
@@ -1323,4 +1970,910 @@ async def get_website_faculty_student(
         db=db,
         scope=scope,
         student_id=student_id,
+    )
+
+
+@router.get(
+    "/batches/{batch_id}/graduation-preview",
+    response_model=WebsiteBatchGraduationPreview,
+)
+async def preview_website_faculty_batch_graduation(
+    batch_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(
+        get_db
+    ),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> WebsiteBatchGraduationPreview:
+    """
+    Preview final-year graduation eligibility within the
+    authenticated website Faculty scope.
+
+    READ ONLY. No Student lifecycle state is changed.
+    """
+
+    try:
+        return await preview_website_batch_graduation(
+            db=db,
+            scope=scope,
+            batch_id=batch_id,
+        )
+
+    except ValueError as error:
+        detail = str(error)
+
+        if (
+            "Active academic batch not found"
+            in detail
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail="Academic batch not found",
+            ) from error
+
+        raise HTTPException(
+            status_code=400,
+            detail=detail,
+        ) from error
+
+
+@router.patch(
+    "/batches/{batch_id}/graduate",
+    response_model=WebsiteBatchGraduationResponse,
+    summary="Graduate eligible final-year students",
+)
+async def graduate_website_faculty_batch(
+    payload: WebsiteBatchGraduateRequest,
+    request: Request,
+    batch_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(
+        get_db
+    ),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> WebsiteBatchGraduationResponse:
+    """
+    Graduate eligible final-year Students inside the authenticated
+    Website Faculty scope.
+
+    HOD:
+        only eligible Students in the authenticated department.
+
+    College Coordinator:
+        eligible Students across the authenticated college.
+
+    Eligibility is derived entirely by the backend:
+        - exact academic batch
+        - final year from batch.course_duration_years
+        - lifecycle ACTIVE
+        - legacy is_active=True
+        - authenticated Faculty scope
+
+    The frontend cannot provide Student IDs, college or department.
+
+    Only Student.lifecycle_status and graduated_at are changed.
+    Academic assignment, current year, Faculty assignment, points,
+    certificates and legacy is_active remain unchanged.
+
+    The Student transitions and immutable AuditLog row are committed
+    atomically in one database transaction.
+    """
+
+    try:
+        response = await graduate_website_batch_final_year(
+            db=db,
+            scope=scope,
+            batch_id=batch_id,
+            payload=payload,
+            request=request,
+        )
+
+        await db.commit()
+
+        return response
+
+    except ValueError as error:
+        await db.rollback()
+
+        message = str(error)
+
+        if message == (
+            "Active academic batch not found within authenticated college"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Academic batch not found",
+            ) from error
+
+        if message == (
+            "Academic batch has invalid course duration"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=message,
+            ) from error
+
+        if message == (
+            "Unsupported website Faculty role for graduation"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Faculty role is not permitted "
+                    "to graduate students"
+                ),
+            ) from error
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=message,
+        ) from error
+
+    except RuntimeError as error:
+        await db.rollback()
+
+        message = str(error)
+
+        if message == (
+            "Graduation eligibility changed during processing; retry"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=message,
+            ) from error
+
+        raise
+
+    except HTTPException:
+        await db.rollback()
+        raise
+
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.get(
+    "/batches/{batch_id}/archive-preview",
+    response_model=WebsiteBatchArchivePreview,
+    summary="Preview graduated students eligible for archive",
+)
+async def preview_website_faculty_batch_archive(
+    batch_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(
+        get_db
+    ),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> WebsiteBatchArchivePreview:
+    """
+    Preview GRADUATED -> ARCHIVED eligibility inside the
+    authenticated Website Faculty scope.
+
+    READ ONLY.
+
+    No Student lifecycle state or operational data is modified.
+    """
+
+    try:
+        return await preview_website_batch_archive(
+            db=db,
+            scope=scope,
+            batch_id=batch_id,
+        )
+
+    except ValueError as error:
+        detail = str(
+            error
+        )
+
+        if (
+            "Active academic batch not found"
+            in detail
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Academic batch not found",
+            ) from error
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail,
+        ) from error
+
+
+
+
+@router.patch(
+    "/batches/{batch_id}/archive",
+    response_model=WebsiteBatchArchiveResponse,
+    summary="Archive graduated students after verified export",
+)
+async def archive_website_faculty_batch(
+    payload: WebsiteBatchArchiveRequest,
+    request: Request,
+    batch_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(
+        get_db
+    ),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> WebsiteBatchArchiveResponse:
+    """
+    Transition GRADUATED -> ARCHIVED only after an exact-scope
+    verified final export exists.
+
+    No Student row or operational record is deleted.
+    """
+
+    try:
+        result = await archive_website_batch_graduated_students(
+            db=db,
+            scope=scope,
+            batch_id=batch_id,
+            payload=payload,
+            request=request,
+        )
+
+        await db.commit()
+
+        return result
+
+    except ValueError as error:
+        await db.rollback()
+
+        detail = str(
+            error
+        )
+
+        if (
+            "Active academic batch not found"
+            in detail
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Academic batch not found",
+            ) from error
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail,
+        ) from error
+
+    except RuntimeError as error:
+        await db.rollback()
+
+        detail = str(
+            error
+        )
+
+        conflict_messages = (
+            "completed verified final export is required",
+            "Student set changed after verified export",
+            "Graduated student set changed after verified export",
+            "Archive eligibility changed during processing",
+        )
+
+        if any(
+            message.lower()
+            in detail.lower()
+            for message in conflict_messages
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=detail,
+            ) from error
+
+        raise
+
+    except HTTPException:
+        await db.rollback()
+        raise
+
+    except Exception:
+        await db.rollback()
+        raise
+
+
+# =========================================================
+# BATCH FINAL EXPORT
+# =========================================================
+
+
+@router.get(
+    "/batches/{batch_id}/exports",
+    response_model=WebsiteBatchExportJobResponse | None,
+    summary="Get latest batch export job",
+)
+async def get_latest_website_batch_export(
+    batch_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(
+        get_db
+    ),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+):
+    """
+    Restore the newest exact-scope batch export after
+    website refresh.
+
+    READ ONLY.
+    """
+
+    try:
+        job = await get_latest_batch_export_job_within_scope(
+            db=db,
+            scope=scope,
+            batch_id=batch_id,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    if job is None:
+        return None
+
+    return _website_batch_export_response(
+        job
+    )
+
+
+@router.post(
+    "/batches/{batch_id}/exports",
+    response_model=WebsiteBatchExportJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Create final batch export job",
+)
+async def create_website_batch_export(
+    batch_id: int = Path(..., ge=1),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+):
+    """
+    Queue one final six-CSV ZIP export.
+
+    Scope is derived entirely from authentication.
+    """
+
+    try:
+        job = await create_batch_export_job(
+            db=db,
+            scope=scope,
+            batch_id=batch_id,
+        )
+
+        job_id = int(job.id)
+
+        await db.commit()
+
+    except ValueError as exc:
+        await db.rollback()
+
+        message = str(exc)
+
+        if (
+            "already pending"
+            in message.lower()
+            or "already processing"
+            in message.lower()
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=message,
+            ) from exc
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=message,
+        ) from exc
+
+    except Exception:
+        await db.rollback()
+        raise
+
+    try:
+        # Local import prevents route/task circular imports.
+        from app.workers.tasks import (
+            process_batch_export_job_task,
+        )
+
+        process_batch_export_job_task.delay(
+            export_job_id=job_id
+        )
+
+    except Exception as exc:
+        # Job was committed already; persist enqueue failure.
+        persisted = await db.get(
+            BatchExportJob,
+            job_id,
+        )
+
+        if persisted is not None:
+            persisted.status = "FAILED"
+            persisted.failure_reason = (
+                "Failed to enqueue export worker"
+            )
+            persisted.verified_at = None
+            persisted.completed_at = None
+
+            await db.commit()
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to queue batch export",
+        ) from exc
+
+    persisted = await db.get(
+        BatchExportJob,
+        job_id,
+    )
+
+    if persisted is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Batch export job could not be reloaded",
+        )
+
+    return _website_batch_export_response(
+        persisted
+    )
+
+
+@router.get(
+    "/batches/{batch_id}/exports/{export_job_id}",
+    response_model=WebsiteBatchExportJobResponse,
+    summary="Get batch export status",
+)
+async def get_website_batch_export_status(
+    batch_id: int = Path(..., ge=1),
+    export_job_id: int = Path(..., ge=1),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+):
+    job = await get_batch_export_job_within_scope(
+        db=db,
+        scope=scope,
+        batch_id=batch_id,
+        export_job_id=export_job_id,
+    )
+
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Batch export job not found",
+        )
+
+    return _website_batch_export_response(
+        job
+    )
+
+
+@router.get(
+    "/batches/{batch_id}/exports/{export_job_id}/download-url",
+    response_model=WebsiteBatchExportDownloadResponse,
+    summary="Get verified batch export download URL",
+)
+async def get_website_batch_export_download_url(
+    batch_id: int = Path(..., ge=1),
+    export_job_id: int = Path(..., ge=1),
+    db: AsyncSession = Depends(get_db),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+):
+    job = await get_batch_export_job_within_scope(
+        db=db,
+        scope=scope,
+        batch_id=batch_id,
+        export_job_id=export_job_id,
+    )
+
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Batch export job not found",
+        )
+
+    if (
+        str(job.status) != "COMPLETED"
+        or job.verified_at is None
+        or not job.bucket
+        or not job.object_key
+        or not job.sha256
+        or job.file_size_bytes is None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Batch export is not completed and verified"
+            ),
+        )
+
+    expires = 600
+
+    try:
+        url = get_presigned_url(
+            bucket=str(job.bucket),
+            object_name=str(
+                job.object_key
+            ),
+            expiry_seconds=expires,
+            public=False,
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Unable to create export download URL"
+            ),
+        ) from exc
+
+    return WebsiteBatchExportDownloadResponse(
+        export_job_id=int(job.id),
+        filename=(
+            f"batch-{int(job.batch_id)}-"
+            f"export-{int(job.id)}.zip"
+        ),
+        url=url,
+        expires_in_seconds=expires,
+        sha256=str(job.sha256),
+        file_size_bytes=int(
+            job.file_size_bytes
+        ),
+    )
+
+
+# =========================================================
+# BATCH PURGE PREVIEW
+# =========================================================
+
+
+@router.get(
+    "/batches/{batch_id}/purge-preview",
+    response_model=WebsiteBatchPurgePreview,
+    summary="Preview archived batch data eligible for purge",
+)
+async def preview_website_faculty_batch_purge(
+    batch_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(
+        get_db
+    ),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+) -> WebsiteBatchPurgePreview:
+    """
+    READ ONLY.
+
+    Preview ARCHIVED -> PURGED for the authenticated
+    Coordinator/HOD scope.
+
+    No Student lifecycle state, PostgreSQL row, object-storage
+    object, certificate, event submission, academic history,
+    export job or audit log is modified.
+    """
+
+    try:
+        return await preview_website_batch_purge(
+            db=db,
+            scope=scope,
+            batch_id=batch_id,
+        )
+
+    except ValueError as error:
+        detail = str(
+            error
+        )
+
+        if (
+            "Active academic batch not found"
+            in detail
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Academic batch not found",
+            ) from error
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail,
+        ) from error
+
+
+
+# =========================================================
+# BATCH PURGE JOB CONTROL PLANE
+# =========================================================
+
+
+@router.get(
+    "/batches/{batch_id}/purges",
+    response_model=WebsiteBatchPurgeJobResponse | None,
+    summary="Get latest batch purge job",
+)
+async def get_latest_website_batch_purge(
+    batch_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(
+        get_db
+    ),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+):
+    """
+    Restore the latest useful exact-scope purge job.
+
+    READ ONLY.
+    """
+
+    try:
+        job = (
+            await get_latest_batch_purge_job_within_scope(
+                db=db,
+                scope=scope,
+                batch_id=batch_id,
+            )
+        )
+
+    except ValueError as exc:
+        message = str(exc)
+
+        if (
+            "only to College Coordinator or HOD"
+            in message
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=message,
+            ) from exc
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=message,
+        ) from exc
+
+    if job is None:
+        return None
+
+    return _website_batch_purge_response(
+        job
+    )
+
+
+@router.post(
+    "/batches/{batch_id}/purges",
+    response_model=WebsiteBatchPurgeJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Create durable batch purge job",
+)
+async def create_website_batch_purge(
+    payload: WebsiteBatchPurgeRequest,
+    batch_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(
+        get_db
+    ),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+):
+    """
+    Create durable PENDING purge metadata and enqueue
+    the purge worker only after the job transaction commits.
+
+    The HTTP request itself performs no physical purge.
+    """
+
+    try:
+        job = await create_batch_purge_job(
+            db=db,
+            scope=scope,
+            batch_id=batch_id,
+            reason=payload.reason,
+        )
+
+        job_id = int(
+            job.id
+        )
+
+        await db.commit()
+
+    except ValueError as exc:
+        await db.rollback()
+
+        message = str(
+            exc
+        )
+
+        if (
+            "only to College Coordinator or HOD"
+            in message
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=message,
+            ) from exc
+
+        if (
+            "Active academic batch not found"
+            in message
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Academic batch not found",
+            ) from exc
+
+        conflict_fragments = (
+            "already pending",
+            "already processing",
+            "No archived students",
+            "verified final export",
+            "Student set changed",
+            "Unsafe storage references",
+            "not ready for purge",
+            "Verified export evidence",
+            "scope mismatch",
+        )
+
+        if any(
+            fragment.lower()
+            in message.lower()
+            for fragment in conflict_fragments
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=message,
+            ) from exc
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=message,
+        ) from exc
+
+    except Exception:
+        await db.rollback()
+        raise
+
+    try:
+        # Local import avoids route/task circular imports.
+        from app.workers.tasks import (
+            process_batch_purge_job_task,
+        )
+
+        process_batch_purge_job_task.delay(
+            purge_job_id=job_id
+        )
+
+    except Exception as exc:
+        # The durable job already committed. Release the active
+        # unique-scope guard by marking enqueue failure FAILED.
+        persisted = await db.get(
+            BatchPurgeJob,
+            job_id,
+        )
+
+        if persisted is not None:
+            persisted.status = "FAILED"
+            persisted.failure_reason = (
+                "Failed to enqueue purge worker"
+            )
+            persisted.completed_at = None
+
+            await db.commit()
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to queue batch purge",
+        ) from exc
+
+    persisted = await db.get(
+        BatchPurgeJob,
+        job_id,
+    )
+
+    if persisted is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "Batch purge job could not be reloaded"
+            ),
+        )
+
+    return _website_batch_purge_response(
+        persisted
+    )
+
+
+@router.get(
+    "/batches/{batch_id}/purges/{purge_job_id}",
+    response_model=WebsiteBatchPurgeJobResponse,
+    summary="Get batch purge job status",
+)
+async def get_website_batch_purge_status(
+    batch_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    purge_job_id: int = Path(
+        ...,
+        ge=1,
+    ),
+    db: AsyncSession = Depends(
+        get_db
+    ),
+    scope: WebsiteFacultyScope = Depends(
+        get_current_enabled_website_faculty_scope
+    ),
+):
+    try:
+        job = await get_batch_purge_job_within_scope(
+            db=db,
+            scope=scope,
+            batch_id=batch_id,
+            purge_job_id=purge_job_id,
+        )
+
+    except ValueError as exc:
+        message = str(
+            exc
+        )
+
+        if (
+            "only to College Coordinator or HOD"
+            in message
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=message,
+            ) from exc
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=message,
+        ) from exc
+
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Batch purge job not found",
+        )
+
+    return _website_batch_purge_response(
+        job
     )

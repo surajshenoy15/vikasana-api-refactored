@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     MINIO_BUCKET_EVENT_THUMBNAILS: str = "vikasana-event-thumbnails"
     MINIO_FACE_BUCKET: str = "face-verification"
     MINIO_BUCKET_CERTIFICATES: str = "vikasana-certificates"
+    MINIO_BUCKET_BATCH_EXPORTS: str = "vikasana-batch-exports"
     MINIO_SECURE: bool = False
     MINIO_PUBLIC_BASE: str = ""
 

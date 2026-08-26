@@ -251,3 +251,101 @@ def check_expo_push_receipts_task(
         )
 
         raise self.retry(exc=exc)
+
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=0,
+)
+def process_batch_export_job_task(
+    self,
+    *,
+    export_job_id: int,
+):
+    """
+    Build and verify one final academic batch export.
+
+    process_batch_export_job itself persists FAILED on errors,
+    so this Celery task intentionally does not automatically retry
+    the same durable job.
+    """
+
+    from app.core.database import AsyncSessionLocal
+    from app.features.faculty.batch_export_service import (
+        process_batch_export_job,
+    )
+
+    async def _process():
+        async with AsyncSessionLocal() as db:
+            job = await process_batch_export_job(
+                db=db,
+                export_job_id=int(
+                    export_job_id
+                ),
+            )
+
+            return {
+                "export_job_id": int(job.id),
+                "status": str(job.status),
+                "verified": (
+                    job.verified_at is not None
+                ),
+            }
+
+    return _run_async(
+        _process()
+    )
+
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=0,
+)
+def process_batch_purge_job_task(
+    self,
+    *,
+    purge_job_id: int,
+):
+    """
+    Execute one durable archived-batch purge.
+
+    The service persists FAILED state itself, so this task does
+    not automatically retry the same durable job.
+    """
+
+    from app.core.database import AsyncSessionLocal
+    from app.features.faculty.website_batch_purge_service import (
+        process_batch_purge_job,
+    )
+
+    async def _process():
+        async with AsyncSessionLocal() as db:
+            job = await process_batch_purge_job(
+                db=db,
+                purge_job_id=int(
+                    purge_job_id
+                ),
+            )
+
+            return {
+                "purge_job_id": int(
+                    job.id
+                ),
+                "status": str(
+                    job.status
+                ),
+                "students_targeted": int(
+                    job.students_targeted
+                    or 0
+                ),
+                "students_purged": int(
+                    job.students_purged
+                    or 0
+                ),
+            }
+
+    return _run_async(
+        _process()
+    )

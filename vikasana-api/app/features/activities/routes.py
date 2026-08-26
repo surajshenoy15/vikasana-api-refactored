@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from app.core.database import get_db
+from app.core.dependencies import get_current_active_student
 from app.core.dependencies import get_current_student, get_current_admin
 
 from app.features.activities.schemas.activity import (
@@ -331,7 +332,7 @@ async def get_types(db: AsyncSession = Depends(get_db)):
 async def request_type(
     payload: RequestActivityTypeIn,
     db: AsyncSession = Depends(get_db),
-    student=Depends(get_current_student),
+    student=Depends(get_current_active_student),
 ):
     return await request_new_activity_type(db, payload.name, payload.description)
 
@@ -340,7 +341,7 @@ async def request_type(
 async def create_activity_session(
     payload: CreateSessionIn,
     db: AsyncSession = Depends(get_db),
-    student=Depends(get_current_student),
+    student=Depends(get_current_active_student),
 ):
     s = await create_session(
         db,
@@ -357,7 +358,7 @@ async def create_activity_session_from_event(
     event_id: int = Query(..., ge=1),
     description: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    student=Depends(get_current_student),
+    student=Depends(get_current_active_student),
 ):
     r = await db.execute(select(Event).where(Event.id == event_id, Event.is_active == True))
     ev = r.scalar_one_or_none()
@@ -455,7 +456,7 @@ async def upload_activity_photo(
     sha256: str | None = Query(None),
     image: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    student=Depends(get_current_student),
+    student=Depends(get_current_active_student),
 ):
     return await _handle_photo_upload_and_save(
         db=db,
@@ -474,7 +475,7 @@ async def upload_activity_photo(
 async def resubmit_session(
     session_id: int,
     db: AsyncSession = Depends(get_db),
-    student=Depends(get_current_student),
+    student=Depends(get_current_active_student),
 ):
     s = await db.get(ActivitySession, session_id)
     if not s or s.student_id != student.id:
@@ -497,7 +498,7 @@ async def resubmit_session(
 async def submit_activity(
     session_id: int,
     db: AsyncSession = Depends(get_db),
-    student=Depends(get_current_student),
+    student=Depends(get_current_active_student),
 ):
     session, newly, total_points, total_hours = await submit_session(db, student.id, session_id)
 
@@ -924,7 +925,7 @@ async def legacy_upload_submission_photo(
     file: UploadFile | None = File(None),
     photo: UploadFile | None = File(None),
     db: AsyncSession = Depends(get_db),
-    student=Depends(get_current_student),
+    student=Depends(get_current_active_student),
 ):
     cap = meta_captured_at or captured_at or meta_captured_at_f or captured_at_f
 
