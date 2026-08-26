@@ -7,6 +7,9 @@ from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.core.cert_sign import verify_sig
 from app.features.certificates.models import Certificate
+from app.features.certificates.verification_page import (
+    render_certificate_verification_page,
+)
 
 # ✅ MUST MATCH QR URL: /api/public/certificates/verify
 router = APIRouter(prefix="/public/certificates", tags=["Public - Certificates"])
@@ -105,7 +108,20 @@ async def verify_certificate(
           <div class="row"><div class="k">Signature</div><div class="v">Mismatch</div></div>
         </div>
         """
-        return HTMLResponse(_page("Certificate Verify", "INVALID", "Signature verification failed. The URL may be altered.", rows), status_code=400)
+        return HTMLResponse(
+            content=render_certificate_verification_page(
+                valid=False,
+                message=(
+                    "The verification signature is invalid. "
+                    "This QR code or verification link may have been altered."
+                ),
+            ),
+            status_code=400,
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     stmt = (
         select(Certificate)
@@ -128,7 +144,22 @@ async def verify_certificate(
           <div class="row"><div class="k">Action</div><div class="v">Contact admin for re-issue</div></div>
         </div>
         """
-        return HTMLResponse(_page("Certificate Verify", "NOT VALID", "Signature is correct, but certificate is not valid in records.", rows), status_code=200)
+        return HTMLResponse(
+            content=render_certificate_verification_page(
+                valid=False,
+                message=(
+                    "This certificate has been revoked and is no longer valid."
+                    if reason == "Revoked"
+                    else
+                    "The certificate could not be found in official records."
+                ),
+            ),
+            status_code=200,
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     s = cert.student
     e = cert.event
@@ -148,4 +179,28 @@ async def verify_certificate(
       <div class="row"><div class="k">Branch</div><div class="v">{getattr(s, "branch", None) or "—"}</div></div>
     </div>
     """
-    return HTMLResponse(_page("Certificate Verify", "VALID", "This certificate is authentic and verified.", rows), status_code=200)
+    return HTMLResponse(
+        content=render_certificate_verification_page(
+            valid=True,
+            certificate_no=cert.certificate_no,
+            student_name=(
+                getattr(s, "name", None)
+                or getattr(s, "full_name", None)
+            ),
+            college=getattr(s, "college", None),
+            event_title=(
+                getattr(e, "title", None)
+                or getattr(e, "name", None)
+            ),
+            category=(
+                getattr(cert, "category", None)
+                or getattr(e, "category", None)
+            ),
+            issued_at=cert.issued_at,
+        ),
+        status_code=200,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
