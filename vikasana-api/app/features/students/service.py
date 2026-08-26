@@ -275,6 +275,164 @@ def _parse_optional_csv_int(
     return value
 
 
+async def resolve_student_academic_batch_from_years(
+    *,
+    db: AsyncSession,
+    college: str,
+    admitted_year: int,
+    passout_year: int,
+    requested_batch_id: int | None = None,
+    requested_current_year: int | None = None,
+):
+    """
+    Resolve the student's active college-wide AcademicBatch from:
+
+        authenticated/student college
+        + admitted_year
+        + passout_year
+
+    batch_id is therefore server-derived.
+
+    New students without an explicit current_year start in Year 1.
+    Existing/reactivated students may preserve their current year
+    later in create_student() when they remain in the same batch.
+
+    This helper performs read queries only.
+    """
+
+    from sqlalchemy import func, select
+
+    from app.features.organization.models import (
+        AcademicBatch,
+    )
+
+    college_value = _clean(
+        college
+    )
+
+    if not college_value:
+        raise ValueError(
+            "Student college is required for batch assignment"
+        )
+
+    admitted_year = int(
+        admitted_year
+    )
+
+    passout_year = int(
+        passout_year
+    )
+
+    if passout_year <= admitted_year:
+        raise ValueError(
+            "Passout year must be after admission year"
+        )
+
+    college_key = (
+        college_value.casefold()
+    )
+
+    result = await db.execute(
+        select(
+            AcademicBatch
+        )
+        .where(
+            func.lower(
+                func.trim(
+                    AcademicBatch.college
+                )
+            )
+            == college_key,
+
+            AcademicBatch.admitted_year
+            == admitted_year,
+
+            AcademicBatch.passout_year
+            == passout_year,
+
+            AcademicBatch.is_active.is_(
+                True
+            ),
+        )
+        .order_by(
+            AcademicBatch.id.asc()
+        )
+        .limit(2)
+    )
+
+    matches = list(
+        result.scalars().all()
+    )
+
+    batch_label = (
+        f"{admitted_year}"
+        f"–"
+        f"{passout_year}"
+    )
+
+    if not matches:
+        raise ValueError(
+            f"Academic batch {batch_label} "
+            f"has not been created for {college_value}. "
+            "Create the batch in Batch Management first."
+        )
+
+    if len(matches) > 1:
+        raise ValueError(
+            f"Multiple active academic batches match "
+            f"{batch_label} for {college_value}"
+        )
+
+    batch = matches[0]
+
+    # The browser/CSV must never override the server-derived
+    # college batch with another batch ID.
+    if (
+        requested_batch_id is not None
+        and int(
+            requested_batch_id
+        )
+        != int(
+            batch.id
+        )
+    ):
+        raise ValueError(
+            "Provided batch_id does not match the "
+            "student admission/passout years"
+        )
+
+    duration = int(
+        batch.course_duration_years
+        or (
+            passout_year
+            - admitted_year
+        )
+    )
+
+    if requested_current_year is None:
+        resolved_current_year = 1
+
+    else:
+        resolved_current_year = int(
+            requested_current_year
+        )
+
+        if (
+            resolved_current_year < 1
+            or resolved_current_year > duration
+        ):
+            raise ValueError(
+                "current_year must be between 1 and "
+                f"{duration} for academic batch "
+                f"{batch_label}"
+            )
+
+    return (
+        batch,
+        resolved_current_year,
+    )
+
+
 async def validate_student_academic_assignment(
     *,
     db: AsyncSession,
@@ -840,6 +998,30 @@ async def create_student(
             raise ValueError(f"Duplicate USN in this college: {usn}")
         raise ValueError(f"Duplicate Email in this college: {email}")
 
+    # --------------------------------------------------------
+    # SERVER-DERIVED ACADEMIC BATCH
+    # --------------------------------------------------------
+    #
+    # The client does not need to know an internal batch_id.
+    # Admission year + passout year + college determine it.
+    #
+    # Example:
+    #   GREEN CIRCUIT
+    #   admitted_year = 2026
+    #   passout_year  = 2030
+    #       -> AcademicBatch 2026–2030
+    #
+    resolved_batch, default_current_year = (
+        await resolve_student_academic_batch_from_years(
+            db=db,
+            college=faculty_college,
+            admitted_year=payload.admitted_year,
+            passout_year=payload.passout_year,
+            requested_batch_id=payload.batch_id,
+            requested_current_year=payload.current_year,
+        )
+    )
+
     academic_fields_set = {
         "department_id",
         "batch_id",
@@ -860,16 +1042,32 @@ async def create_student(
             if "department_id" in payload.model_fields_set
             else previous_department_id
         )
-        target_batch_id = (
-            payload.batch_id
-            if "batch_id" in payload.model_fields_set
-            else previous_batch_id
+        # Batch is always derived from admission/passout years.
+        target_batch_id = int(
+            resolved_batch.id
         )
-        target_current_year = (
-            payload.current_year
-            if "current_year" in payload.model_fields_set
-            else previous_current_year
-        )
+        # Preserve an existing year only when the student remains
+        # in the same resolved batch. Otherwise start from the
+        # requested/default year.
+        if payload.current_year is not None:
+            target_current_year = int(
+                payload.current_year
+            )
+
+        elif (
+            previous_batch_id is not None
+            and int(previous_batch_id)
+            == int(resolved_batch.id)
+            and previous_current_year is not None
+        ):
+            target_current_year = int(
+                previous_current_year
+            )
+
+        else:
+            target_current_year = int(
+                default_current_year
+            )
         target_assigned_faculty_id = (
             payload.assigned_faculty_id
             if "assigned_faculty_id" in payload.model_fields_set
@@ -886,8 +1084,15 @@ async def create_student(
         previous_assigned_faculty_id = None
 
         target_department_id = payload.department_id
-        target_batch_id = payload.batch_id
-        target_current_year = payload.current_year
+        target_batch_id = int(
+            resolved_batch.id
+        )
+
+        target_current_year = (
+            int(payload.current_year)
+            if payload.current_year is not None
+            else int(default_current_year)
+        )
         target_assigned_faculty_id = (
             payload.assigned_faculty_id
         )
@@ -1205,6 +1410,20 @@ async def create_students_from_csv(
                 field_name="assigned_faculty_id",
             )
 
+            # CSV users do not need to know database batch IDs.
+            # The active college batch is resolved from the
+            # mandatory admitted_year + passout_year columns.
+            resolved_batch, default_current_year = (
+                await resolve_student_academic_batch_from_years(
+                    db=db,
+                    college=row_college,
+                    admitted_year=admitted_year,
+                    passout_year=passout_year,
+                    requested_batch_id=batch_id,
+                    requested_current_year=current_year,
+                )
+            )
+
             academic_headers = {
                 "department_id",
                 "batch_id",
@@ -1236,16 +1455,28 @@ async def create_students_from_csv(
                     if "department_id" in headers
                     else previous_department_id
                 )
-                target_batch_id = (
-                    batch_id
-                    if "batch_id" in headers
-                    else previous_batch_id
+                target_batch_id = int(
+                    resolved_batch.id
                 )
-                target_current_year = (
-                    current_year
-                    if "current_year" in headers
-                    else previous_current_year
-                )
+                if current_year is not None:
+                    target_current_year = int(
+                        current_year
+                    )
+
+                elif (
+                    previous_batch_id is not None
+                    and int(previous_batch_id)
+                    == int(resolved_batch.id)
+                    and previous_current_year is not None
+                ):
+                    target_current_year = int(
+                        previous_current_year
+                    )
+
+                else:
+                    target_current_year = int(
+                        default_current_year
+                    )
                 target_assigned_faculty_id = (
                     assigned_faculty_id
                     if "assigned_faculty_id" in headers
@@ -1258,8 +1489,15 @@ async def create_students_from_csv(
                 previous_assigned_faculty_id = None
 
                 target_department_id = department_id
-                target_batch_id = batch_id
-                target_current_year = current_year
+                target_batch_id = int(
+                    resolved_batch.id
+                )
+
+                target_current_year = (
+                    int(current_year)
+                    if current_year is not None
+                    else int(default_current_year)
+                )
                 target_assigned_faculty_id = assigned_faculty_id
 
             # -------------------------------------------------
