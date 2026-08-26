@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     MINIO_FACE_BUCKET: str = "face-verification"
     MINIO_BUCKET_CERTIFICATES: str = "vikasana-certificates"
     MINIO_BUCKET_BATCH_EXPORTS: str = "vikasana-batch-exports"
+
+    # AWS production bucket for final academic batch exports.
+    # AWS buckets are infrastructure and must already exist.
+    # The application must never require s3:CreateBucket.
+    AWS_S3_BUCKET_BATCH_EXPORTS: str = ""
     MINIO_SECURE: bool = False
     MINIO_PUBLIC_BASE: str = ""
 

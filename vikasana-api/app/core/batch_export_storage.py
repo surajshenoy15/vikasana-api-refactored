@@ -33,6 +33,93 @@ def get_batch_export_storage_provider() -> str:
     return value or "minio"
 
 
+def get_batch_export_bucket() -> str:
+    """
+    Resolve the final batch-export storage bucket.
+
+    AWS:
+        AWS_S3_BUCKET_BATCH_EXPORTS
+
+    MinIO/local:
+        MINIO_BUCKET_BATCH_EXPORTS
+    """
+
+    provider = (
+        get_batch_export_storage_provider()
+    )
+
+    if provider == "aws":
+        bucket = str(
+            settings.AWS_S3_BUCKET_BATCH_EXPORTS
+            or ""
+        ).strip()
+
+        if not bucket:
+            raise RuntimeError(
+                "AWS batch export bucket is not configured. "
+                "Set AWS_S3_BUCKET_BATCH_EXPORTS."
+            )
+
+        return bucket
+
+    bucket = str(
+        settings.MINIO_BUCKET_BATCH_EXPORTS
+        or ""
+    ).strip()
+
+    if not bucket:
+        raise RuntimeError(
+            "Batch export bucket is not configured"
+        )
+
+    return bucket
+
+
+
+def ensure_batch_export_bucket(
+    *,
+    client,
+    bucket: str,
+) -> None:
+    """
+    Verify that batch-export storage is usable.
+
+    MinIO/local may create its bucket automatically.
+
+    AWS production must use a pre-created bucket and must
+    never require s3:CreateBucket.
+    """
+
+    provider = (
+        get_batch_export_storage_provider()
+    )
+
+    if provider == "aws":
+        try:
+            exists = client.bucket_exists(
+                bucket
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Unable to verify AWS batch export bucket "
+                f"{bucket!r}: {exc}"
+            ) from exc
+
+        if not exists:
+            raise RuntimeError(
+                "AWS batch export bucket does not exist "
+                f"or is not accessible: {bucket}"
+            )
+
+        return
+
+    ensure_bucket(
+        client,
+        bucket,
+    )
+
+
+
 def build_batch_export_object_key(
     *,
     export_job_id: int,
@@ -197,21 +284,13 @@ def upload_and_verify_batch_export(
             "Batch export ZIP is empty"
         )
 
-    bucket = str(
-        settings.MINIO_BUCKET_BATCH_EXPORTS
-        or ""
-    ).strip()
-
-    if not bucket:
-        raise RuntimeError(
-            "Batch export bucket is not configured"
-        )
+    bucket = get_batch_export_bucket()
 
     client = get_minio()
 
-    ensure_bucket(
-        client,
-        bucket,
+    ensure_batch_export_bucket(
+        client=client,
+        bucket=bucket,
     )
 
     client.fput_object(
