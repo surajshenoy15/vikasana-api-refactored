@@ -310,6 +310,18 @@ app.include_router(
 )
 
 
+# ── Super Admin ──
+
+from app.features.super_admin.routes import (
+    router as super_admin_router,
+)
+
+app.include_router(
+    super_admin_router,
+    prefix="/api",
+)
+
+
 # ── Immutable Audit Logs ──
 
 from app.features.audit.routes import (

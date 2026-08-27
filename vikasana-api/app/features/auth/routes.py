@@ -48,13 +48,17 @@ async def admin_verify_mfa(
     payload: AdminMFAVerifyRequest,
     db: AsyncSession = Depends(get_db),
 ) -> LoginResponse:
-    response = await verify_admin_mfa(payload, db)
+    response = await verify_admin_mfa(
+        payload,
+        db,
+        request=request,
+    )
 
     await append_audit_log(
         db,
         actor_type="ADMIN",
         actor_id=response.admin.id,
-        actor_role="admin",
+        actor_role=response.admin.role,
         actor_name=response.admin.name,
         actor_identifier=str(response.admin.id),
         actor_email=response.admin.email,

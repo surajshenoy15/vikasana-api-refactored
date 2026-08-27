@@ -2,7 +2,7 @@ from datetime import datetime, timezone, timedelta
 import hashlib
 import secrets
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException, Request, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +10,11 @@ from app.core.config import settings
 from app.core.security import create_access_token, verify_password
 
 from app.features.auth.models import Admin, AdminMFAOtp
+from app.features.auth.admin_session_service import create_admin_session
+from app.features.audit.service import (
+    get_request_ip,
+    get_user_agent,
+)
 from app.features.faculty.models import Faculty
 from app.features.college_access.service import ensure_college_is_active
 from app.core.email_service import send_admin_mfa_otp_email
@@ -118,6 +123,7 @@ async def login(payload: LoginRequest, db: AsyncSession) -> AdminMFAStartRespons
 async def verify_admin_mfa(
     payload: AdminMFAVerifyRequest,
     db: AsyncSession,
+    request: Request | None = None,
 ) -> LoginResponse:
     """
     Admin login step 2:
@@ -126,6 +132,18 @@ async def verify_admin_mfa(
     - Update last_login_at
     - Return real access token
     """
+    # Password-change OTP tokens cannot be used for login.
+    if (
+        payload.mfa_token
+        and payload.mfa_token.startswith(
+            "pwdchg_"
+        )
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid MFA token",
+        )
+
     result = await db.execute(
         select(AdminMFAOtp)
         .where(AdminMFAOtp.mfa_token == payload.mfa_token)
@@ -191,11 +209,81 @@ async def verify_admin_mfa(
     otp_row.used = True
     admin.last_login_at = now
 
+    # -----------------------------------------------------
+    # CREATE ADMIN DEVICE / LOGIN SESSION
+    # -----------------------------------------------------
+
+    device_name = (
+        payload.device_name
+        or (
+            f"{payload.browser_name} on {payload.os_name}"
+            if payload.browser_name and payload.os_name
+            else None
+        )
+        or payload.browser_name
+        or payload.os_name
+        or "Admin Web"
+    )
+
+    session = await create_admin_session(
+        db,
+        admin=admin,
+
+        device_id=payload.device_id,
+        device_name=device_name,
+        device_model=payload.device_model,
+        device_type=payload.device_type,
+
+        platform=(
+            payload.platform
+            or "web"
+        ),
+
+        os_name=payload.os_name,
+        os_version=payload.os_version,
+
+        browser_name=payload.browser_name,
+        browser_version=payload.browser_version,
+
+        app_name=(
+            payload.app_name
+            or "LoRaa Admin"
+        ),
+        app_version=payload.app_version,
+
+        ip_address=get_request_ip(
+            request
+        ),
+        user_agent=get_user_agent(
+            request
+        ),
+    )
+
     db.add(otp_row)
     db.add(admin)
+
+    # OTP consumed + last login + session creation are committed
+    # together.
     await db.commit()
 
-    token = create_access_token(admin.id, admin.email)
+    await db.refresh(session)
+
+    # -----------------------------------------------------
+    # SESSION-AWARE ACCESS TOKEN
+    # -----------------------------------------------------
+
+    token = create_access_token(
+        admin.id,
+        admin.email,
+        role=admin.role,
+        session_id=session.session_id,
+        token_version=int(
+            admin.token_version or 1
+        ),
+        expires_minutes=(
+            settings.ACCESS_TOKEN_EXPIRE_MINUTES
+        ),
+    )
 
     return LoginResponse(
         access_token=token,
@@ -204,6 +292,7 @@ async def verify_admin_mfa(
             id=admin.id,
             name=admin.name,
             email=admin.email,
+            role=admin.role,
         ),
     )
 
@@ -277,6 +366,7 @@ async def get_me(admin: Admin) -> MeResponse:
         id=admin.id,
         name=admin.name,
         email=admin.email,
+        role=admin.role,
         is_active=admin.is_active,
         last_login_at=admin.last_login_at,
         created_at=admin.created_at,

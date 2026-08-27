@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from jose import jwt
 from passlib.context import CryptContext
 from app.core.config import settings
@@ -45,11 +45,30 @@ def verify_password(plain: str, hashed: str | None) -> bool:
 
 
 # ── JWT Token ─────────────────────────────────────────────────────────
-def create_access_token(admin_id: int, email: str) -> str:
+def create_access_token(
+    admin_id: int,
+    email: str,
+    *,
+    role: str | None = None,
+    session_id: str | None = None,
+    token_version: int | None = None,
+    expires_minutes: int | None = None,
+) -> str:
     """
-    Creates a signed JWT with NO expiry.
-    Token remains valid until SECRET_KEY changes.
+    Create a signed access JWT.
+
+    Backward compatibility:
+    - Existing Faculty calls can continue passing only
+      admin_id + email.
+    - Session/security claims are added only when provided.
+
+    Admin/Super Admin login will pass:
+    - role
+    - session_id (sid)
+    - token_version (tv)
+    - expires_minutes
     """
+
     now = datetime.now(timezone.utc)
 
     payload = {
@@ -59,12 +78,28 @@ def create_access_token(admin_id: int, email: str) -> str:
         "iat": int(now.timestamp()),
     }
 
+    if role is not None:
+        payload["role"] = role
+
+    if session_id is not None:
+        payload["sid"] = session_id
+
+    if token_version is not None:
+        payload["tv"] = int(token_version)
+
+    if expires_minutes is not None:
+        payload["exp"] = (
+            now
+            + timedelta(
+                minutes=expires_minutes
+            )
+        )
+
     return jwt.encode(
         payload,
         settings.SECRET_KEY,
         algorithm=settings.ALGORITHM,
     )
-
 
 def decode_access_token(token: str) -> dict:
     """

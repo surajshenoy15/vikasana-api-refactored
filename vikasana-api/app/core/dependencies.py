@@ -7,6 +7,9 @@ from sqlalchemy import select
 from app.core.database import get_db
 from app.core.jwt import decode_access_token
 from app.features.auth.models import Admin
+from app.features.auth.admin_session_service import (
+    validate_admin_session,
+)
 from app.features.faculty.models import Faculty
 from app.features.students.models import Student
 from app.features.college_access.service import ensure_college_is_active
@@ -34,50 +37,162 @@ async def get_current_admin(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
     db: AsyncSession = Depends(get_db),
 ) -> Admin:
+    """
+    Authenticate an Admin / Super Admin access token.
+
+    Admin tokens are session-aware:
+    - sid identifies the authenticated device session
+    - tv is compared with admins.token_version
+    - admin_sessions is checked for active/revoked/expired state
+
+    Legacy Admin tokens without sid/tv are intentionally rejected
+    after the session-security rollout and must log in again.
+    """
+
     not_authenticated = _not_authenticated_exception()
 
-    print("🔐 get_current_admin called")
-    print("🔐 credentials present:", bool(credentials))
-
     if not credentials:
-        print("❌ No credentials received")
         raise not_authenticated
 
     try:
-        token = credentials.credentials
-        print("🔐 raw token prefix:", token[:30] if token else None)
+        payload = decode_access_token(
+            credentials.credentials
+        )
 
-        payload = decode_access_token(token)
-        print("🔐 decoded payload:", payload)
-
-        admin_id = int(payload["sub"])
+        admin_id = int(
+            payload["sub"]
+        )
 
         if payload.get("type") != "access":
-            print("❌ token type invalid:", payload.get("type"))
             raise not_authenticated
 
-    except (JWTError, KeyError, ValueError) as e:
-        print("❌ token decode failed:", repr(e))
+        session_id = payload.get(
+            "sid"
+        )
+
+        token_version = payload.get(
+            "tv"
+        )
+
+        if not session_id or token_version is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=(
+                    "Admin session is no longer valid. "
+                    "Please log in again."
+                ),
+                headers={
+                    "WWW-Authenticate": "Bearer"
+                },
+            )
+
+        token_version = int(
+            token_version
+        )
+
+    except HTTPException:
+        raise
+
+    except (
+        JWTError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
         raise not_authenticated
 
-    result = await db.execute(select(Admin).where(Admin.id == admin_id))
+
+    # -----------------------------------------------------
+    # ADMIN ACCOUNT
+    # -----------------------------------------------------
+
+    result = await db.execute(
+        select(Admin).where(
+            Admin.id == admin_id
+        )
+    )
+
     admin = result.scalar_one_or_none()
 
-    print("🔐 admin found:", bool(admin), "admin_id:", admin_id)
-
     if admin is None:
-        print("❌ admin not found for id:", admin_id)
         raise not_authenticated
 
     if not admin.is_active:
-        print("❌ admin inactive:", admin_id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="This admin account has been deactivated",
+            detail=(
+                "This admin account has been deactivated"
+            ),
         )
 
-    print("✅ admin authenticated:", admin_id)
+
+    # -----------------------------------------------------
+    # GLOBAL TOKEN VERSION
+    # -----------------------------------------------------
+
+    current_token_version = int(
+        admin.token_version or 1
+    )
+
+    if token_version != current_token_version:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                "Admin session has been revoked. "
+                "Please log in again."
+            ),
+            headers={
+                "WWW-Authenticate": "Bearer"
+            },
+        )
+
+
+    # -----------------------------------------------------
+    # DEVICE SESSION
+    # -----------------------------------------------------
+
+    session = await validate_admin_session(
+        db,
+        session_id=str(
+            session_id
+        ),
+        admin_id=admin.id,
+    )
+
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                "Admin session has expired or been revoked. "
+                "Please log in again."
+            ),
+            headers={
+                "WWW-Authenticate": "Bearer"
+            },
+        )
+
     return admin
+
+
+
+async def require_super_admin(
+    current_admin: Admin = Depends(get_current_admin),
+) -> Admin:
+    """
+    Require an authenticated, active LoRaa Connect Super Admin.
+
+    Normal admins continue to use get_current_admin().
+    Only routes explicitly protected with this dependency
+    require role == "super_admin".
+    """
+
+    if current_admin.role != "super_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Super admin access required",
+        )
+
+    return current_admin
 
 
 async def get_current_faculty(

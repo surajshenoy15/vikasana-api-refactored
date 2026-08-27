@@ -26,6 +26,7 @@ class AdminInfo(BaseModel):
     id: int
     name: str
     email: str
+    role: str
 
     model_config = {"from_attributes": True}
 
@@ -51,15 +52,80 @@ class AdminMFAStartResponse(BaseModel):
 class AdminMFAVerifyRequest(BaseModel):
     """
     Request body for verifying admin OTP.
+
+    Device fields are optional for backward compatibility.
+    Existing Admin frontend clients can continue sending only
+    mfa_token + otp.
     """
+
     mfa_token: str
-    otp: str = Field(..., min_length=6, max_length=6)
+    otp: str = Field(
+        ...,
+        min_length=6,
+        max_length=6,
+    )
+
+    device_id: str | None = Field(
+        default=None,
+        max_length=255,
+    )
+
+    device_name: str | None = Field(
+        default=None,
+        max_length=255,
+    )
+
+    device_model: str | None = Field(
+        default=None,
+        max_length=255,
+    )
+
+    device_type: str | None = Field(
+        default=None,
+        max_length=50,
+    )
+
+    platform: str | None = Field(
+        default=None,
+        max_length=50,
+    )
+
+    os_name: str | None = Field(
+        default=None,
+        max_length=100,
+    )
+
+    os_version: str | None = Field(
+        default=None,
+        max_length=100,
+    )
+
+    browser_name: str | None = Field(
+        default=None,
+        max_length=100,
+    )
+
+    browser_version: str | None = Field(
+        default=None,
+        max_length=100,
+    )
+
+    app_name: str | None = Field(
+        default=None,
+        max_length=100,
+    )
+
+    app_version: str | None = Field(
+        default=None,
+        max_length=100,
+    )
 
 class MeResponse(BaseModel):
     """Full admin profile — returned by GET /auth/me"""
     id: int
     name: str
     email: str
+    role: str
     is_active: bool
     last_login_at: datetime | None
     created_at: datetime
