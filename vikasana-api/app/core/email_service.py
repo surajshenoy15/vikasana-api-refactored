@@ -10,7 +10,7 @@ def _brevo_cfg() -> tuple[str, str, str]:
     api_key = os.getenv("SENDINBLUE_API_KEY", "")
     if not api_key:
         raise RuntimeError("SENDINBLUE_API_KEY not configured")
-    from_email = os.getenv("EMAIL_FROM", "admin@vikasana.org")
+    from_email = os.getenv("EMAIL_FROM", "noreply@loraaventures.com")
     from_name  = os.getenv("EMAIL_FROM_NAME", "LoRaa Connect")
     return api_key, from_email, from_name
 

@@ -70,7 +70,7 @@ class Settings(BaseSettings):
 
     # ── Email (Brevo / Sendinblue) ──
     SENDINBLUE_API_KEY: str = ""
-    EMAIL_FROM: str = "admin@vikasana.org"
+    EMAIL_FROM: str = "noreply@loraaventures.com"
     EMAIL_FROM_NAME: str = "Vikasana Foundation"
 
     # ── Faculty Activation ──
