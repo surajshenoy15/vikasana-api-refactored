@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     # ── Email (Brevo / Sendinblue) ──
     SENDINBLUE_API_KEY: str = ""
     EMAIL_FROM: str = "noreply@loraaventures.com"
-    EMAIL_FROM_NAME: str = "Vikasana Foundation"
+    EMAIL_FROM_NAME: str = "LoRaa Connect"
 
     # ── Faculty Activation ──
     FRONTEND_BASE_URL: str = "http://localhost:5173"
