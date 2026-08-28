@@ -386,6 +386,18 @@ app.include_router(
 )
 
 
+# ── Mobile App Version Policy ──
+
+from app.features.app_version.routes import (
+    router as app_version_router,
+)
+
+app.include_router(
+    app_version_router,
+    prefix="/api",
+)
+
+
 # ── Health Checks ──
 
 @app.get("/", tags=["Health"])
