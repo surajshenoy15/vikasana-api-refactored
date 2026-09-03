@@ -957,63 +957,252 @@ def build_xlsx(
     )
 
     # --------------------------------------------------------
+    # PAGE / PRINT SETTINGS
+    # --------------------------------------------------------
+
+    worksheet.hide_gridlines(2)
+    worksheet.set_landscape()
+    worksheet.set_paper(9)  # A4
+    worksheet.fit_to_pages(1, 0)
+
+    worksheet.set_margins(
+        0.25,
+        0.25,
+        0.4,
+        0.4,
+    )
+
+    worksheet.center_horizontally()
+
+    # Title + scope + two header rows
+    worksheet.repeat_rows(
+        0,
+        3,
+    )
+
+    # --------------------------------------------------------
+    # COLORS
+    # --------------------------------------------------------
+
+    NAVY = "#0F2747"
+    NAVY_LIGHT = "#173B66"
+    HEADER_BLUE = "#DCE6F1"
+    BORDER = "#7F8C9A"
+    ROW_ALT = "#F7F9FC"
+    WHITE = "#FFFFFF"
+    TEXT = "#172033"
+    MUTED = "#52606D"
+    GREEN = "#E8F5E9"
+    GREEN_TEXT = "#176B33"
+
+    # --------------------------------------------------------
     # FORMATS
     # --------------------------------------------------------
 
     title_format = workbook.add_format(
         {
             "bold": True,
-            "font_size": 15,
+            "font_size": 16,
+            "font_color": WHITE,
+            "bg_color": NAVY,
             "align": "center",
             "valign": "vcenter",
             "border": 1,
+            "border_color": NAVY,
+        }
+    )
+
+    scope_format = workbook.add_format(
+        {
+            "bold": True,
+            "font_size": 10,
+            "font_color": MUTED,
+            "bg_color": "#F4F7FB",
+            "align": "center",
+            "valign": "vcenter",
+            "border": 1,
+            "border_color": BORDER,
         }
     )
 
     group_format = workbook.add_format(
         {
             "bold": True,
+            "font_size": 10,
+            "font_color": WHITE,
+            "bg_color": NAVY_LIGHT,
             "align": "center",
             "valign": "vcenter",
             "text_wrap": True,
             "border": 1,
+            "border_color": BORDER,
         }
     )
 
     header_format = workbook.add_format(
         {
             "bold": True,
+            "font_size": 9,
+            "font_color": TEXT,
+            "bg_color": HEADER_BLUE,
             "align": "center",
             "valign": "vcenter",
             "text_wrap": True,
             "border": 1,
+            "border_color": BORDER,
         }
     )
 
     text_format = workbook.add_format(
         {
-            "valign": "top",
+            "font_size": 9,
+            "font_color": TEXT,
+            "valign": "vcenter",
             "text_wrap": True,
             "border": 1,
+            "border_color": BORDER,
+        }
+    )
+
+    text_alt_format = workbook.add_format(
+        {
+            "font_size": 9,
+            "font_color": TEXT,
+            "bg_color": ROW_ALT,
+            "valign": "vcenter",
+            "text_wrap": True,
+            "border": 1,
+            "border_color": BORDER,
         }
     )
 
     center_format = workbook.add_format(
         {
+            "font_size": 9,
+            "font_color": TEXT,
             "align": "center",
-            "valign": "top",
+            "valign": "vcenter",
             "text_wrap": True,
             "border": 1,
+            "border_color": BORDER,
+        }
+    )
+
+    center_alt_format = workbook.add_format(
+        {
+            "font_size": 9,
+            "font_color": TEXT,
+            "bg_color": ROW_ALT,
+            "align": "center",
+            "valign": "vcenter",
+            "text_wrap": True,
+            "border": 1,
+            "border_color": BORDER,
         }
     )
 
     total_format = workbook.add_format(
         {
             "bold": True,
+            "font_size": 10,
+            "font_color": TEXT,
             "align": "center",
-            "valign": "top",
+            "valign": "vcenter",
             "border": 1,
+            "border_color": BORDER,
         }
+    )
+
+    total_alt_format = workbook.add_format(
+        {
+            "bold": True,
+            "font_size": 10,
+            "font_color": TEXT,
+            "bg_color": ROW_ALT,
+            "align": "center",
+            "valign": "vcenter",
+            "border": 1,
+            "border_color": BORDER,
+        }
+    )
+
+    completed_total_format = workbook.add_format(
+        {
+            "bold": True,
+            "font_size": 10,
+            "font_color": GREEN_TEXT,
+            "bg_color": GREEN,
+            "align": "center",
+            "valign": "vcenter",
+            "border": 1,
+            "border_color": BORDER,
+        }
+    )
+
+    # --------------------------------------------------------
+    # REPORT SCOPE
+    # --------------------------------------------------------
+
+    college_names = sorted(
+        {
+            str(
+                student.get("college")
+                or ""
+            ).strip()
+            for student in items
+            if str(
+                student.get("college")
+                or ""
+            ).strip()
+        }
+    )
+
+    department_names = sorted(
+        {
+            str(
+                student.get("department_code")
+                or student.get("department_name")
+                or student.get("branch")
+                or ""
+            ).strip()
+            for student in items
+            if str(
+                student.get("department_code")
+                or student.get("department_name")
+                or student.get("branch")
+                or ""
+            ).strip()
+        }
+    )
+
+    scope_parts = []
+
+    if len(college_names) == 1:
+        scope_parts.append(
+            f"College: {college_names[0]}"
+        )
+
+    elif len(college_names) > 1:
+        scope_parts.append(
+            "College: Multiple"
+        )
+
+    if len(department_names) == 1:
+        scope_parts.append(
+            f"Department: {department_names[0]}"
+        )
+
+    elif len(department_names) > 1:
+        scope_parts.append(
+            "Department: All Departments"
+        )
+
+    scope_parts.append(
+        f"Students: {len(items)}"
+    )
+
+    scope_text = "    |    ".join(
+        scope_parts
     )
 
     # --------------------------------------------------------
@@ -1026,48 +1215,54 @@ def build_xlsx(
         title_format,
     )
 
+    worksheet.merge_range(
+        "A2:S2",
+        scope_text,
+        scope_format,
+    )
+
     # --------------------------------------------------------
-    # GROUP HEADERS - SAME STYLE AS YOUR SAMPLE
+    # GROUP HEADERS
     # --------------------------------------------------------
 
     worksheet.merge_range(
-        "A2:C2",
+        "A3:C3",
         "Student Details",
         group_format,
     )
 
     worksheet.merge_range(
-        "D2:F2",
+        "D3:F3",
         "Activity Head 1",
         group_format,
     )
 
     worksheet.merge_range(
-        "G2:I2",
+        "G3:I3",
         "Activity Head 2",
         group_format,
     )
 
     worksheet.merge_range(
-        "J2:L2",
+        "J3:L3",
         "Activity Head 3",
         group_format,
     )
 
     worksheet.merge_range(
-        "M2:O2",
+        "M3:O3",
         "Activity Head 4",
         group_format,
     )
 
     worksheet.merge_range(
-        "P2:R2",
+        "P3:R3",
         "Activity Head 5",
         group_format,
     )
 
-    worksheet.write(
-        "S2",
+    worksheet.merge_range(
+        "S3:S4",
         "Total Activity Points Earned",
         group_format,
     )
@@ -1079,20 +1274,109 @@ def build_xlsx(
     headers = export_headers()
 
     for column_index, header in enumerate(
-        headers
+        headers[:18]
     ):
         worksheet.write(
-            2,
+            3,
             column_index,
             header,
             header_format,
         )
 
     # --------------------------------------------------------
+    # ROW HEIGHT
+    # --------------------------------------------------------
+
+    activity_name_columns = {
+        3,
+        6,
+        9,
+        12,
+        15,
+    }
+
+    def estimate_row_height(
+        values: list[Any],
+    ) -> float:
+
+        max_lines = 1
+
+        for column_index in (
+            2,
+            3,
+            6,
+            9,
+            12,
+            15,
+        ):
+
+            if column_index >= len(values):
+                continue
+
+            value = str(
+                values[column_index]
+                or ""
+            )
+
+            if not value:
+                continue
+
+            approximate_width = (
+                38
+                if column_index
+                in activity_name_columns
+                else 24
+            )
+
+            logical_lines = 0
+
+            for line in (
+                value.splitlines()
+                or [""]
+            ):
+
+                logical_lines += max(
+                    1,
+                    (
+                        len(line)
+                        + approximate_width
+                        - 1
+                    )
+                    // approximate_width,
+                )
+
+            max_lines = max(
+                max_lines,
+                logical_lines,
+            )
+
+        return min(
+            90,
+            max(
+                24,
+                17 * max_lines,
+            ),
+        )
+
+    # --------------------------------------------------------
     # STUDENTS
     # --------------------------------------------------------
 
-    row_index = 3
+    row_index = 4
+
+    center_columns = {
+        0,
+        4,
+        5,
+        7,
+        8,
+        10,
+        11,
+        13,
+        14,
+        16,
+        17,
+    }
 
     for serial, student in enumerate(
         items,
@@ -1104,30 +1388,54 @@ def build_xlsx(
             serial,
         )
 
+        is_alt_row = (
+            serial % 2 == 0
+        )
+
         for column_index, value in enumerate(
             values
         ):
 
-            if column_index in {
-                0,
-                4,
-                5,
-                7,
-                8,
-                10,
-                11,
-                13,
-                14,
-                16,
-                17,
-            }:
-                cell_format = center_format
+            if column_index == 18:
 
-            elif column_index == 18:
-                cell_format = total_format
+                try:
+                    numeric_total = float(
+                        value
+                    )
+
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    numeric_total = 0
+
+                if numeric_total >= 100:
+                    cell_format = (
+                        completed_total_format
+                    )
+
+                else:
+                    cell_format = (
+                        total_alt_format
+                        if is_alt_row
+                        else total_format
+                    )
+
+            elif column_index in center_columns:
+
+                cell_format = (
+                    center_alt_format
+                    if is_alt_row
+                    else center_format
+                )
 
             else:
-                cell_format = text_format
+
+                cell_format = (
+                    text_alt_format
+                    if is_alt_row
+                    else text_format
+                )
 
             worksheet.write(
                 row_index,
@@ -1136,10 +1444,17 @@ def build_xlsx(
                 cell_format,
             )
 
+        worksheet.set_row(
+            row_index,
+            estimate_row_height(
+                values
+            ),
+        )
+
         row_index += 1
 
     # --------------------------------------------------------
-    # WIDTHS
+    # COLUMN WIDTHS
     # --------------------------------------------------------
 
     worksheet.set_column(
@@ -1154,7 +1469,7 @@ def build_xlsx(
 
     worksheet.set_column(
         "C:C",
-        25,
+        27,
     )
 
     for column in [
@@ -1166,7 +1481,7 @@ def build_xlsx(
     ]:
         worksheet.set_column(
             f"{column}:{column}",
-            40,
+            38,
         )
 
     for column in [
@@ -1178,7 +1493,7 @@ def build_xlsx(
     ]:
         worksheet.set_column(
             f"{column}:{column}",
-            14,
+            13,
         )
 
     for column in [
@@ -1190,33 +1505,54 @@ def build_xlsx(
     ]:
         worksheet.set_column(
             f"{column}:{column}",
-            18,
+            17,
         )
 
     worksheet.set_column(
         "S:S",
-        18,
+        20,
     )
+
+    # --------------------------------------------------------
+    # HEADER HEIGHTS
+    # --------------------------------------------------------
 
     worksheet.set_row(
         0,
-        25,
+        30,
     )
 
     worksheet.set_row(
         1,
-        35,
+        22,
     )
 
     worksheet.set_row(
         2,
-        55,
+        32,
     )
 
-    worksheet.freeze_panes(
+    worksheet.set_row(
         3,
+        48,
+    )
+
+    # --------------------------------------------------------
+    # FREEZE / PRINT AREA
+    # --------------------------------------------------------
+
+    worksheet.freeze_panes(
+        4,
         3,
     )
+
+    if items:
+        worksheet.print_area(
+            0,
+            0,
+            row_index - 1,
+            18,
+        )
 
     workbook.close()
 
