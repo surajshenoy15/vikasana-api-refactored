@@ -398,6 +398,24 @@ app.include_router(
 )
 
 
+# ── VTU / AICTE Activity Points Reports ──
+
+from app.features.vtu_reports.routes import (
+    admin_router as admin_vtu_reports_router,
+    website_router as website_vtu_reports_router,
+)
+
+app.include_router(
+    admin_vtu_reports_router,
+    prefix="/api",
+)
+
+app.include_router(
+    website_vtu_reports_router,
+    prefix="/api",
+)
+
+
 # ── Health Checks ──
 
 @app.get("/", tags=["Health"])
