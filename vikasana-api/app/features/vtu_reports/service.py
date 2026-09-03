@@ -17,6 +17,12 @@ from app.features.activities.models import (
 from app.features.organization.models import AcademicBatch, Department
 from app.features.students.models import Student
 
+from app.features.events.models import (
+    Event,
+    EventSubmission,
+    EventActivityType,
+)
+
 
 VTU_REQUIRED_HEADS = 5
 VTU_POINTS_PER_HEAD = 20
@@ -451,6 +457,75 @@ async def build_vtu_report(
     ]
 
     # --------------------------------------------------------
+    # ACTUAL EVENT TITLES USED FOR EACH ACTIVITY TYPE
+    #
+    # Only submissions that really credited > 0 points are
+    # considered. This prevents old zero-point/test events
+    # from appearing in the official VTU report.
+    # --------------------------------------------------------
+
+    event_title_result = await db.execute(
+        select(
+            EventSubmission.student_id,
+            EventActivityType.activity_type_id,
+            Event.id.label("event_id"),
+            Event.title.label("event_title"),
+        )
+        .join(
+            Event,
+            Event.id == EventSubmission.event_id,
+        )
+        .join(
+            EventActivityType,
+            EventActivityType.event_id == Event.id,
+        )
+        .where(
+            EventSubmission.student_id.in_(student_ids),
+            EventSubmission.points_credited.is_(True),
+            EventSubmission.awarded_points > 0,
+        )
+        .order_by(
+            EventSubmission.student_id.asc(),
+            EventActivityType.activity_type_id.asc(),
+            Event.event_date.asc().nullsfirst(),
+            Event.id.asc(),
+        )
+    )
+
+    event_titles_by_student_type: dict[
+        tuple[int, int],
+        list[str],
+    ] = defaultdict(list)
+
+    seen_event_ids: dict[
+        tuple[int, int],
+        set[int],
+    ] = defaultdict(set)
+
+    for row in event_title_result.all():
+
+        key = (
+            int(row.student_id),
+            int(row.activity_type_id),
+        )
+
+        event_id = int(row.event_id)
+
+        if event_id in seen_event_ids[key]:
+            continue
+
+        seen_event_ids[key].add(event_id)
+
+        title = str(
+            row.event_title or ""
+        ).strip()
+
+        if title:
+            event_titles_by_student_type[
+                key
+            ].append(title)
+
+    # --------------------------------------------------------
     # EXISTING LORAA CREDITED POINTS
     #
     # IMPORTANT:
@@ -504,6 +579,37 @@ async def build_vtu_report(
             earned_points,
         )
 
+        activity_type_name = str(
+            activity_type.name
+            or f"Activity {activity_type.id}"
+        ).strip()
+
+        event_titles = list(
+            event_titles_by_student_type.get(
+                (
+                    int(stats.student_id),
+                    int(activity_type.id),
+                ),
+                [],
+            )
+        )
+
+        # Official VTU activity-head display:
+        #
+        # Multiple events under the same admin-selected
+        # Activity Type are combined into one head.
+        #
+        # Example:
+        # Blood Donation + Cleanliness Drive + Cycle Street
+        #
+        # If no positive credited event can be resolved,
+        # fall back safely to the Activity Type name.
+        display_activity_name = (
+            " + ".join(event_titles)
+            if event_titles
+            else activity_type_name
+        )
+
         activity_by_student[
             int(stats.student_id)
         ].append(
@@ -514,10 +620,16 @@ async def build_vtu_report(
                 "activity_no": get_activity_number(
                     activity_type
                 ),
-                "activity_name": str(
-                    activity_type.name
-                    or f"Activity {activity_type.id}"
-                ),
+
+                # Generic configured Activity Type
+                "activity_type_name": activity_type_name,
+
+                # Actual LoRaa events contributing to this head
+                "event_titles": event_titles,
+
+                # What appears in the VTU Excel Activity Head
+                "activity_name": display_activity_name,
+
                 "verified_hours": verified_hours,
                 "earned_points": earned_points,
                 "counted_points": counted_points,
