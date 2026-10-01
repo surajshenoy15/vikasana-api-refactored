@@ -7,21 +7,121 @@ from urllib.parse import urlparse, unquote
 
 import boto3
 from botocore.config import Config
+from minio import Minio
 from minio.error import S3Error
 
-from app.core.minio_client import (
-    get_minio,
-    get_public_minio,
-    ensure_bucket as ensure_storage_bucket,
-)
 
 
 def _env(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
 
 
+def _env_bool(name: str, default: str = "false") -> bool:
+    return _env(name, default).lower() in (
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    )
+
+
+def _certificate_minio_credentials():
+    access_key = (
+        _env("MINIO_ACCESS_KEY")
+        or _env("MINIO_ROOT_USER")
+    )
+
+    secret_key = (
+        _env("MINIO_SECRET_KEY")
+        or _env("MINIO_ROOT_PASSWORD")
+    )
+
+    if not access_key or not secret_key:
+        raise RuntimeError(
+            "MinIO credentials missing for certificate storage"
+        )
+
+    return access_key, secret_key
+
+
+def _certificate_internal_minio() -> Minio:
+    """
+    Internal VPS MinIO client used for certificate uploads/checks.
+
+    This intentionally ignores global S3_PROVIDER.
+    """
+    endpoint = _env(
+        "MINIO_ENDPOINT",
+        "minio:9000",
+    )
+
+    endpoint = (
+        endpoint
+        .replace("http://", "")
+        .replace("https://", "")
+        .rstrip("/")
+    )
+
+    access_key, secret_key = (
+        _certificate_minio_credentials()
+    )
+
+    return Minio(
+        endpoint,
+        access_key=access_key,
+        secret_key=secret_key,
+        secure=_env_bool(
+            "MINIO_SECURE",
+            "false",
+        ),
+    )
+
+
+def _certificate_public_minio() -> Minio:
+    """
+    Public MinIO client used only for browser-safe certificate URLs.
+
+    This intentionally ignores global S3_PROVIDER.
+    """
+    endpoint = _env(
+        "MINIO_PUBLIC_ENDPOINT",
+        "minio.vikasanafoundation.org",
+    )
+
+    endpoint = (
+        endpoint
+        .replace("http://", "")
+        .replace("https://", "")
+        .rstrip("/")
+    )
+
+    access_key, secret_key = (
+        _certificate_minio_credentials()
+    )
+
+    return Minio(
+        endpoint,
+        access_key=access_key,
+        secret_key=secret_key,
+        secure=_env_bool(
+            "MINIO_PUBLIC_SECURE",
+            "true",
+        ),
+    )
+
+
 def _storage_provider() -> str:
-    return _env("S3_PROVIDER", "minio").lower()
+    """
+    Certificate storage provider.
+
+    Certificates can use VPS MinIO independently while other
+    legacy application media may still use the global S3 provider.
+    """
+    return _env(
+        "CERTIFICATE_STORAGE_PROVIDER",
+        _env("S3_PROVIDER", "minio"),
+    ).lower()
 
 
 def _certificate_bucket() -> str:
@@ -49,10 +149,15 @@ def ensure_bucket() -> None:
     bucket = _certificate_bucket()
 
     try:
-        minio = get_minio()
-        ensure_storage_bucket(minio, bucket)
+        minio = _certificate_internal_minio()
+
+        if not minio.bucket_exists(bucket):
+            minio.make_bucket(bucket)
+
     except S3Error as e:
-        raise RuntimeError(f"Certificate bucket ensure failed: {e}") from e
+        raise RuntimeError(
+            f"Certificate bucket ensure failed: {e}"
+        ) from e
 
 
 def build_object_key(cert_id: int) -> str:
@@ -123,7 +228,7 @@ def upload_certificate_pdf_bytes(cert_id: int, pdf_bytes: bytes) -> str:
     size = len(pdf_bytes)
 
     try:
-        minio = get_minio()
+        minio = _certificate_internal_minio()
 
         minio.put_object(
             bucket_name=bucket,
@@ -197,7 +302,7 @@ def _minio_presign_certificate_url(
     expires_in: int,
 ) -> str:
     try:
-        public_minio = get_public_minio()
+        public_minio = _certificate_public_minio()
 
         return public_minio.presigned_get_object(
             bucket_name=bucket,
