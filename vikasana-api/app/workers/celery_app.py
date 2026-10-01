@@ -2,6 +2,9 @@
 import os
 from celery import Celery
 
+# Register all SQLAlchemy models for Celery worker processes.
+import app.core.model_registry  # noqa: F401
+
 celery_app = Celery(
     "vikasana_workers",
     broker=os.getenv("CELERY_BROKER_URL", "redis://127.0.0.1:6379/1"),
